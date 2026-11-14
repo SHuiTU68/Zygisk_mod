@@ -36,7 +36,7 @@ using namespace std;
 
 static void hook_unloader();
 static void unhook_functions();
-static void spoof_virtual_maps(const char *needle);
+static void spoof_virtual_maps(const char *needle, bool exec_only = false);
 static void restore_strdup_hook();
 
 namespace {
@@ -561,6 +561,10 @@ void ZygiskContext::run_modules_pre() {
     // mappings with anonymous copies before any module code runs so that
     // /proc/self/maps does not expose an executable memfd.
     spoof_virtual_maps("/memfd:");
+    // Modules may also dlopen helper libraries straight from their module
+    // directory. Those executable file-backed mappings are an equally direct
+    // fingerprint, so anonymize them too.
+    spoof_virtual_maps("/data/adb/modules/", true);
 
     for (auto &m : modules) {
         m.onLoad(env);
@@ -621,6 +625,8 @@ void ZygiskContext::app_specialize_post() {
     // lifetime of the process, so this is the only chance to remove its path
     // from /proc/self/maps.
     spoof_virtual_maps("libzygisk.so");
+    // Catch libraries loaded by modules in postAppSpecialize.
+    spoof_virtual_maps("/data/adb/modules/", true);
 
     // Cleanups
     env->ReleaseStringUTFChars(args.app->nice_name, process);
@@ -672,6 +678,7 @@ void ZygiskContext::nativeForkSystemServer_post() {
         LOGV("post forkSystemServer\n");
         run_modules_post();
         spoof_virtual_maps("libzygisk.so");
+        spoof_virtual_maps("/data/adb/modules/", true);
     }
     fork_post();
 }
@@ -786,11 +793,12 @@ void hook_functions() {
 // the same address, then give it a benign VMA name. The data is byte-identical,
 // so relocations, GOT entries and static data keep working; only the link to
 // the backing file (and its path in /proc/self/maps) disappears.
-static void spoof_virtual_maps(const char *needle) {
+static void spoof_virtual_maps(const char *needle, bool exec_only) {
     if (needle == nullptr || *needle == '\0') return;
 
     for (auto &map : hook_engine::MapInfo::Scan()) {
         if (map.path.find(needle) == std::string::npos) continue;
+        if (exec_only && (map.perms & PROT_EXEC) == 0) continue;
 
         const size_t size = map.end - map.start;
         if (size == 0) continue;

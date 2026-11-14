@@ -43,11 +43,11 @@ pub fn main() -> Result<()> {
     info!("Welcome to Zygisk_mod ({}) !", constants::ZKSU_VERSION);
 
     TMP_PATH.init(std::env::var("TMP_PATH")?);
-    CONTROLLER_SOCKET.init(format!("{}/init_monitor", TMP_PATH.deref()));
+    CONTROLLER_SOCKET.init(format!("{}/.m", TMP_PATH.deref()));
     PATH_CP_NAME.init(format!(
         "{}/{}",
         TMP_PATH.deref(),
-        lp_select!("/cp32.sock", "/cp64.sock")
+        lp_select!("/.c32", "/.c64")
     ));
 
     let arch = get_arch()?;
@@ -582,7 +582,7 @@ fn write_zn_state_file(states: &HashMap<PathBuf, (u32, u32)>) {
         })
         .collect();
     lines.sort();
-    let target = format!("{}/zn_modules_state", TMP_PATH.deref());
+    let target = format!("{}/.zs", TMP_PATH.deref());
     let staging = format!("{}.tmp", target);
     let result =
         fs::write(&staging, lines.join("\n") + "\n").and_then(|_| fs::rename(&staging, &target));

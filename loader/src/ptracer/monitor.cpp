@@ -37,7 +37,7 @@ enum TracingState {
 
 std::string monitor_stop_reason;
 
-constexpr char SOCKET_NAME[] = "init_monitor";
+constexpr char SOCKET_NAME[] = ".m";
 
 struct EventLoop;
 
@@ -284,7 +284,7 @@ static bool ensure_daemon_created() {
             PLOGE("create daemon");
             return false;
         } else if (pid == 0) {
-            execl("./bin/zygiskd64", "zygiskd64", nullptr);
+            execl("./bin/d64", "d64", nullptr);
             PLOGE("exec daemon failed");
             exit(1);
         } else {
@@ -406,7 +406,7 @@ public:
                             }
                             // Only the 64-bit zygote is supported.
                             if (program == "/system/bin/app_process64") {
-                                tracer = "./bin/zygisk-ptrace64";
+                                tracer = "./bin/p64";
                                 if (should_stop_inject64()) {
                                     LOGW("zygote64 restart too much times, stop injecting");
                                     tracing_state = STOPPING;

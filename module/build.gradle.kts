@@ -145,19 +145,19 @@ androidComponents.onVariants { variant ->
                     )
                     set.add(
                         Pair(
-                            root.file("bin/zygisk-ptrace64").asFile,
+                            root.file("bin/p64").asFile,
                             root.file("lib/$abi64/libzygisk_ptrace.so").asFile
                         )
                     )
                     set.add(
                         Pair(
-                            root.file("bin/zygiskd64").asFile,
+                            root.file("bin/d64").asFile,
                             root.file("bin/$abi64/zygiskd").asFile
                         )
                     )
                     set.add(
                         Pair(
-                            root.file("bin/zygisk-ctl").asFile,
+                            root.file("bin/ctl").asFile,
                             root.file("zygisk-ctl.sh").asFile
                         )
                     )

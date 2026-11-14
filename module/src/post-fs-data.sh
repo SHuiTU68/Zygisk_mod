@@ -25,21 +25,29 @@ fi
 
 create_sys_perm() {
   mkdir -p $1
-  chmod 555 $1
+  # 0711 lets app processes traverse the directory to reach companion sockets
+  # but prevents them from listing its contents.
+  chmod 711 $1
   chcon u:object_r:system_file:s0 $1
 }
 
-# Keep the loader in a hidden tmpfs directory. `/dev/net0` was a well-known
-# fingerprint used by several Zygisk detectors.
-export TMP_PATH=/dev/.zsu
+# Keep the loader in a hidden tmpfs directory. `/dev/net0` and `/dev/.zsu`
+# were well-known fingerprints used by Zygisk detectors.
+export TMP_PATH=/dev/.run
+
+rm -rf /dev/.zsu
 
 create_sys_perm $TMP_PATH
 
 if [ -f $MODDIR/lib64/libzygisk.so ];then
   create_sys_perm $TMP_PATH/lib64
+  # The loader copy is only read by the root ptracer; keep it out of reach of
+  # unprivileged processes.
+  chmod 700 $TMP_PATH/lib64
   cp $MODDIR/lib64/libzygisk.so $TMP_PATH/lib64/libzygisk.so
+  chmod 600 $TMP_PATH/lib64/libzygisk.so
   chcon u:object_r:system_file:s0 $TMP_PATH/lib64/libzygisk.so
 fi
 
 [ "$DEBUG" = true ] && export RUST_BACKTRACE=1
-./bin/zygisk-ptrace64 monitor &
+./bin/p64 monitor &

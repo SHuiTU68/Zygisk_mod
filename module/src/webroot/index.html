@@ -85,7 +85,7 @@
   <script>
 
 	const modeSelect = document.getElementById('denylist-mode');
-	const ctl = '/data/adb/modules/admirepowered/bin/zygisk-ctl';
+	const ctl = '/data/adb/modules/admirepowered/bin/ctl';
 
 	// 仅还原挂载(just_umount) 与 强制卸载(enforce) 二选一
 	function setDenylistMode(mode) {
@@ -118,7 +118,7 @@
 	  });
 
 	  try	{
-		info = ksu.exec('/data/adb/modules/admirepowered/bin/zygiskd64 version');
+		info = ksu.exec('/data/adb/modules/admirepowered/bin/d64 version');
 		item[1].textContent=info;
 
 		info = ksu.exec(ctl + ' denylist');

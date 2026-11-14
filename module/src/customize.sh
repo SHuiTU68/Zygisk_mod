@@ -109,15 +109,15 @@ mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 
 mkdir "$MODPATH/bin"
 mkdir "$MODPATH/lib64"
-mv "$MODPATH/zygisk-ctl.sh" "$MODPATH/bin/zygisk-ctl"
+mv "$MODPATH/zygisk-ctl.sh" "$MODPATH/bin/ctl"
 unzip -o "$ZIPFILE" "webroot/*" -x "*.sha256" -d "$MODPATH"
 
 ui_print "- Extracting arm64 libraries"
 extract "$ZIPFILE" 'bin/arm64-v8a/zygiskd' "$MODPATH/bin" true
-mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd64"
+mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/d64"
 extract "$ZIPFILE" 'lib/arm64-v8a/libzygisk.so' "$MODPATH/lib64" true
 extract "$ZIPFILE" 'lib/arm64-v8a/libzygisk_ptrace.so' "$MODPATH/bin" true
-mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace64"
+mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/p64"
 
 extract "$ZIPFILE" 'machikado.arm' "$MODPATH" true
 mv "$MODPATH/machikado.arm" "$MODPATH/machikado"

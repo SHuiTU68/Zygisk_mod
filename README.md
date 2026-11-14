@@ -56,7 +56,8 @@ implementation:
 
 + loader and module `memfd` mappings are replaced with anonymous, benignly
   named mappings after specialization (`/proc/self/maps` no longer exposes
-  their paths)
+  their paths); executable libraries that modules `dlopen` from their own
+  module directory are anonymized in the same way
 + the loader itself is mapped by an in-tree ELF linker instead of the system
   linker, so it never shows up in `soinfo`/`dl_iterate_phdr()`; the mappings
   are anonymous and named like ART JIT/DEX regions. The in-tree linker handles
@@ -69,7 +70,12 @@ implementation:
 + inherited file descriptors are no longer mass-closed, defeating the
   descriptor-close trap
 + the per-app `/data/adb` control-file check moved into `zygiskd`
-+ the loader directory is no longer the well-known `/dev/net0`
++ the loader directory is no longer the well-known `/dev/net0`; it lives in a
+  traversal-only (`0711`) directory, and the loader copy inside it is readable
+  by root only
++ the daemons are installed as `bin/d64` / `bin/p64` and the companion /
+  monitor sockets use neutral names (`/.m`, `/.c64`), so process listings and
+  `/proc/net/unix` no longer contain `zygisk` keywords
 
 ## Exclusion modes
 
@@ -87,9 +93,9 @@ Next:
 Change the mode at runtime through the bundled control script:
 
 ```sh
-/data/adb/modules/admirepowered/bin/zygisk-ctl.sh denylist just_umount
-/data/adb/modules/admirepowered/bin/zygisk-ctl.sh denylist enforce
-/data/adb/modules/admirepowered/bin/zygisk-ctl.sh denylist   # print current mode
+/data/adb/modules/admirepowered/bin/ctl denylist just_umount
+/data/adb/modules/admirepowered/bin/ctl denylist enforce
+/data/adb/modules/admirepowered/bin/ctl denylist   # print current mode
 ```
 
 Only regular application UIDs (`10000..19999`, any user profile) are matched by
