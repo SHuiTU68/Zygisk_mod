@@ -30,18 +30,18 @@ fn start() {
         println!("root impl: {:?}", root_impl::get_impl());
         return;
     } else if args.len() == 2 && args[1] == "eable" {
-        let path = "/data/adb/modules/admirepowered/noable";
+        let path = constants::PATH_CONTROL_DISABLE_UNMOUNT;
         if Path::new(path).exists() {
-            fs::remove_file(path).expect("Failed to remove noable file");
+            fs::remove_file(path).expect("Failed to remove control file");
         }
         return;
     } else if args.len() == 2 && args[1] == "dable" {
-        // Create the noable file with content "1"
-        let path = "/data/adb/modules/admirepowered/noable";
-        fs::write(path, "1").expect("Failed to write noable file");
+        // Create the control file with content "1"
+        let path = constants::PATH_CONTROL_DISABLE_UNMOUNT;
+        fs::write(path, "1").expect("Failed to write control file");
         return;
-    }else if args.len() == 2 && args[1] == "status" {
-        let path = "/data/adb/modules/admirepowered/noable";
+    } else if args.len() == 2 && args[1] == "status" {
+        let path = constants::PATH_CONTROL_DISABLE_UNMOUNT;
         if Path::new(path).exists() {
             println!("1");
         } else {

@@ -1,15 +1,26 @@
 #include <linux/un.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <limits.h>
+#include <cstring>
 
 #include "daemon.h"
 #include "dl.h"
 #include "socket_utils.h"
 
 namespace zygiskd {
-    static std::string TMP_PATH;
+    // A dynamically-initialized std::string registers a destructor with
+    // __cxa_atexit, which leaves an observable entry in libc's atexit table for
+    // the entire lifetime of every app process. Keep this as plain storage.
+    static char TMP_PATH[PATH_MAX] = {};
+
     void Init(const char *path) {
-        TMP_PATH = path;
+        if (path == nullptr) {
+            TMP_PATH[0] = '\0';
+            return;
+        }
+        strncpy(TMP_PATH, path, sizeof(TMP_PATH) - 1);
+        TMP_PATH[sizeof(TMP_PATH) - 1] = '\0';
     }
 
     std::string GetTmpPath() {
@@ -17,12 +28,15 @@ namespace zygiskd {
     }
 
     int Connect(uint8_t retry) {
+        if (TMP_PATH[0] == '\0') {
+            return -1;
+        }
         int fd = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         struct sockaddr_un addr{
                 .sun_family = AF_UNIX,
                 .sun_path={0},
         };
-        auto socket_path = TMP_PATH + kCPSocketName;
+        auto socket_path = GetTmpPath() + kCPSocketName;
         strcpy(addr.sun_path, socket_path.c_str());
         socklen_t socklen = sizeof(addr);
 

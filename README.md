@@ -32,6 +32,26 @@ Standalone implementation of Zygisk, providing Zygisk API support for KernelSU,A
 
 ## Compatibility
 
++ Android 8.0 - Android 16 (API 26 - 36), including 16 KB page-size devices
++ Built with AGP 8.13, Gradle 8.13, JDK 17 and Android NDK r28
++ Zygisk API v5 (`mount_sysprop_overrides` and the Android 15/16 Zygote signatures)
++ `lsplt` updated to the latest upstream (Android 16 / 16 KB page support)
+
 `PROCESS_ON_DENYLIST` cannot be flagged correctly for isolated processes on Magisk DenyList currently.
 
 Zygisk_mod only guarantees the same behavior of Zygisk API, but will NOT ensure Magisk's internal features.
+
+## Hardening
+
+This fork adds a few process-level hardening measures on top of the original
+implementation:
+
++ loader and module `memfd` mappings are replaced with anonymous, benignly
+  named mappings after specialization (`/proc/self/maps` no longer exposes
+  their paths)
++ the one-shot `strdup` PLT hook is removed after the Zygote JNI hooks are
+  installed
++ inherited file descriptors are no longer mass-closed, defeating the
+  descriptor-close trap
++ the per-app `/data/adb` control-file check moved into `zygiskd`
++ the loader directory is no longer the well-known `/dev/net0`

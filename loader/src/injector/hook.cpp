@@ -6,8 +6,8 @@
 #include <list>
 #include <map>
 #include <array>
-#include <iostream>
-#include <filesystem>
+#include <cstring>
+#include <cerrno>
 
 #include <lsplt.hpp>
 
@@ -16,6 +16,13 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+#ifndef PR_SET_VMA
+#define PR_SET_VMA 0x53564d41
+#endif
+#ifndef PR_SET_VMA_ANON_NAME
+#define PR_SET_VMA_ANON_NAME 0
+#endif
 
 #include "dl.h"
 #include "daemon.h"
@@ -27,10 +34,11 @@
 #include "art_method.hpp"
 
 using namespace std;
-namespace fs = std::filesystem;
 
 static void hook_unloader();
 static void unhook_functions();
+static void spoof_virtual_maps(const char *needle);
+static void restore_strdup_hook();
 
 namespace {
 
@@ -48,8 +56,6 @@ enum {
 #define DCL_PRE_POST(name) \
 void name##_pre();         \
 void name##_post();
-
-#define MAX_FD_SIZE 1024
 
 struct ZygiskContext;
 
@@ -70,7 +76,6 @@ struct ZygiskContext {
     int pid;
     bitset<FLAG_MAX> flags;
     uint32_t info_flags;
-    bitset<MAX_FD_SIZE> allowed_fds;
     vector<int> exempted_fds;
 
     struct RegisterInfo {
@@ -123,6 +128,9 @@ struct ZygiskContext {
 vector<tuple<dev_t, ino_t, const char *, void **>> *plt_hook_list;
 map<string, vector<JNINativeMethod>, StringCmp> *jni_hook_list;
 bool should_unmap_zygisk = false;
+
+dev_t android_runtime_dev = 0;
+ino_t android_runtime_inode = 0;
 
 } // namespace
 
@@ -201,10 +209,17 @@ DCL_HOOK_FUNC(int, pthread_attr_destroy, void *target) {
 
 void initialize_jni_hook();
 
+// Zygote may resolve the same class name more than once. Installing the JNI
+// hooks twice would record our own trampoline as the "original" method.
+static bool jni_hook_attempted = false;
+
 DCL_HOOK_FUNC(char *, strdup, const char *s) {
     if (s == "com.android.internal.os.ZygoteInit"sv) {
         LOGV("strdup %s\n", s);
-        initialize_jni_hook();
+        if (!jni_hook_attempted) {
+            jni_hook_attempted = true;
+            initialize_jni_hook();
+        }
     }
     return old_strdup(s);
 }
@@ -306,6 +321,11 @@ void initialize_jni_hook() {
 
     can_hook_jni = true;
     do_hook_zygote(env);
+
+    // `strdup` is only needed once, to detect ZygoteInit. Leaving the GOT entry
+    // permanently redirected is a cheap and reliable Zygisk fingerprint, so put
+    // the original back as soon as the JNI hooks are installed.
+    restore_strdup_hook();
 }
 
 // -----------------------------------------------------------------
@@ -418,6 +438,7 @@ bool ZygiskModule::valid() const {
     if (mod.api_version == nullptr)
         return false;
     switch (*mod.api_version) {
+        case 5:
         case 4:
         case 3:
         case 2:
@@ -470,27 +491,17 @@ void ZygiskContext::fork_pre() {
     // First block SIGCHLD, unblock after original fork is done
     sigmask(SIG_BLOCK, SIGCHLD);
     pid = old_fork();
-    if (pid != 0 || flags[SKIP_FD_SANITIZATION])
-        return;
-
-    // Record all open fds
-    auto dir = xopen_dir("/proc/self/fd");
-    for (dirent *entry; (entry = readdir(dir.get()));) {
-        int fd = parse_int(entry->d_name);
-        if (fd < 0 || fd >= MAX_FD_SIZE) {
-            close(fd);
-            continue;
-        }
-        allowed_fds[fd] = true;
-    }
-    // The dirfd should not be allowed
-    allowed_fds[dirfd(dir.get())] = false;
 }
 
 void ZygiskContext::sanitize_fds() {
     if (flags[SKIP_FD_SANITIZATION])
         return;
 
+    // Zygisk used to close every descriptor that was not in `allowed_fds`.
+    // Apart from being unnecessary (Zygote already closes unknown descriptors
+    // for app forks), that behaviour is a well-known detection primitive: an
+    // app can plant a descriptor before fork and check whether we closed it.
+    // Only merge our own exempted descriptors into `fds_to_ignore` now.
     if (flags[APP_FORK_AND_SPECIALIZE]) {
         auto update_fd_array = [&](int off) -> jintArray {
             if (exempted_fds.empty())
@@ -501,11 +512,6 @@ void ZygiskContext::sanitize_fds() {
                 return nullptr;
 
             env->SetIntArrayRegion(array, off, static_cast<int>(exempted_fds.size()), exempted_fds.data());
-            for (int fd : exempted_fds) {
-                if (fd >= 0 && fd < MAX_FD_SIZE) {
-                    allowed_fds[fd] = true;
-                }
-            }
             *args.app->fds_to_ignore = array;
             flags[SKIP_FD_SANITIZATION] = true;
             return array;
@@ -514,31 +520,12 @@ void ZygiskContext::sanitize_fds() {
         if (jintArray fdsToIgnore = *args.app->fds_to_ignore) {
             int *arr = env->GetIntArrayElements(fdsToIgnore, nullptr);
             int len = env->GetArrayLength(fdsToIgnore);
-            for (int i = 0; i < len; ++i) {
-                int fd = arr[i];
-                if (fd >= 0 && fd < MAX_FD_SIZE) {
-                    allowed_fds[fd] = true;
-                }
-            }
             if (jintArray newFdList = update_fd_array(len)) {
                 env->SetIntArrayRegion(newFdList, 0, len, arr);
             }
             env->ReleaseIntArrayElements(fdsToIgnore, arr, JNI_ABORT);
         } else {
             update_fd_array(0);
-        }
-    }
-
-    if (pid != 0)
-        return;
-
-    // Close all forbidden fds to prevent crashing
-    auto dir = open_dir("/proc/self/fd");
-    int dfd = dirfd(dir.get());
-    for (dirent *entry; (entry = readdir(dir.get()));) {
-        int fd = parse_int(entry->d_name);
-        if ((fd < 0 || fd >= MAX_FD_SIZE || !allowed_fds[fd]) && fd != dfd) {
-            close(fd);
         }
     }
 }
@@ -555,11 +542,20 @@ void ZygiskContext::run_modules_pre() {
     auto size = ms.size();
     for (size_t i = 0; i < size; i++) {
         auto& m = ms[i];
-        if (void* handle = DlopenMem(m.memfd, RTLD_NOW);
-            void* entry = handle ? dlsym(handle, "zygisk_module_entry") : nullptr) {
+        void* handle = DlopenMem(m.memfd, RTLD_NOW);
+        // The linker has mapped the memfd; keeping the descriptor around only
+        // gives detectors another /proc/self/fd entry to look at.
+        close(m.memfd);
+        m.memfd = -1;
+        if (void* entry = handle ? dlsym(handle, "zygisk_module_entry") : nullptr) {
             modules.emplace_back(i, handle, entry);
         }
     }
+
+    // Module libraries are mapped from memfds. Replace those file-backed
+    // mappings with anonymous copies before any module code runs so that
+    // /proc/self/maps does not expose an executable memfd.
+    spoof_virtual_maps("/memfd:");
 
     for (auto &m : modules) {
         m.onLoad(env);
@@ -587,14 +583,14 @@ void ZygiskContext::run_modules_post() {
 void ZygiskContext::app_specialize_pre() {
     flags[APP_SPECIALIZE] = true;
     info_flags = zygiskd::GetProcessFlags(g_ctx->args.app->uid);
-    std::string filePath = "/data/adb/modules/admirepowered/noable";
-    if (!fs::exists(filePath)) {
 
-        if ((info_flags & PROCESS_ON_DENYLIST)==PROCESS_ON_DENYLIST){
-            flags[DO_REVERT_UNMOUNT] = true;
-        }
-        
-    } 
+    // The "keep module dir mounted" toggle used to be a stat() of
+    // /data/adb/modules/.../noable performed inside the app process. zygiskd
+    // now resolves it and reports the internal PROCESS_DISABLE_UNMOUNT flag,
+    // so the app process never has to touch /data/adb.
+    if ((info_flags & PROCESS_ON_DENYLIST) && !(info_flags & PROCESS_DISABLE_UNMOUNT)) {
+        flags[DO_REVERT_UNMOUNT] = true;
+    }
 
     if ((info_flags & (PROCESS_IS_MANAGER | PROCESS_ROOT_IS_MAGISK)) == (PROCESS_IS_MANAGER | PROCESS_ROOT_IS_MAGISK)) {
         LOGI("current uid %d is manager!", g_ctx->args.app->uid);
@@ -607,6 +603,11 @@ void ZygiskContext::app_specialize_pre() {
 
 void ZygiskContext::app_specialize_post() {
     run_modules_post();
+
+    // Hide the loader's own file-backed mappings. It stays resident for the
+    // lifetime of the process, so this is the only chance to remove its path
+    // from /proc/self/maps.
+    spoof_virtual_maps("libzygisk.so");
 
     // Cleanups
     env->ReleaseStringUTFChars(args.app->nice_name, process);
@@ -657,6 +658,7 @@ void ZygiskContext::nativeForkSystemServer_post() {
     if (pid == 0) {
         LOGV("post forkSystemServer\n");
         run_modules_post();
+        spoof_virtual_maps("libzygisk.so");
     }
     fork_post();
 }
@@ -746,8 +748,6 @@ void hook_functions() {
     default_new(plt_hook_list);
     default_new(jni_hook_list);
 
-    ino_t android_runtime_inode = 0;
-    dev_t android_runtime_dev = 0;
     for (auto &map : lsplt::MapInfo::Scan()) {
         if (map.path.ends_with("libandroid_runtime.so")) {
             android_runtime_inode = map.inode;
@@ -766,6 +766,74 @@ void hook_functions() {
     plt_hook_list->erase(
             std::remove_if(plt_hook_list->begin(), plt_hook_list->end(),
                            [](auto &t) { return *std::get<3>(t) == nullptr;}),
+            plt_hook_list->end());
+}
+
+// Replace every file-backed mapping matching `needle` with an anonymous copy at
+// the same address, then give it a benign VMA name. The data is byte-identical,
+// so relocations, GOT entries and static data keep working; only the link to
+// the backing file (and its path in /proc/self/maps) disappears.
+static void spoof_virtual_maps(const char *needle) {
+    if (needle == nullptr || *needle == '\0') return;
+
+    for (auto &map : lsplt::MapInfo::Scan()) {
+        if (map.path.find(needle) == std::string::npos) continue;
+
+        const size_t size = map.end - map.start;
+        if (size == 0) continue;
+
+        const int prot = map.perms;
+        void *addr = reinterpret_cast<void *>(map.start);
+        void *copy = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (copy == MAP_FAILED) {
+            LOGW("spoof: mmap failed for %s: %s\n", map.path.c_str(), strerror(errno));
+            continue;
+        }
+
+        // The original mapping is normally readable, but be defensive.
+        if ((prot & PROT_READ) == 0 && mprotect(addr, size, PROT_READ) != 0) {
+            LOGW("spoof: mprotect(read) failed for %s: %s\n", map.path.c_str(), strerror(errno));
+            munmap(copy, size);
+            continue;
+        }
+        memcpy(copy, addr, size);
+
+        // Apply the final protection before moving the mapping so that a code
+        // page is already executable when the calling thread returns to it.
+        if (mprotect(copy, size, prot) != 0) {
+            LOGW("spoof: mprotect failed for %s: %s\n", map.path.c_str(), strerror(errno));
+            munmap(copy, size);
+            continue;
+        }
+
+        if (mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, addr) == MAP_FAILED) {
+            LOGW("spoof: mremap failed for %s: %s\n", map.path.c_str(), strerror(errno));
+            munmap(copy, size);
+            continue;
+        }
+
+        const char *anon_name = (prot & PROT_EXEC) ? "dalvik-jit-code-cache" : "dalvik-DEX data";
+        prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, size, anon_name);
+    }
+}
+
+static void restore_strdup_hook() {
+    if (android_runtime_inode == 0 || old_strdup == nullptr) return;
+    if (!lsplt::RegisterHook(android_runtime_dev, android_runtime_inode, "strdup",
+                             reinterpret_cast<void *>(old_strdup), nullptr)) {
+        return;
+    }
+    if (!lsplt::CommitHook()) {
+        LOGW("failed to commit strdup unhook\n");
+        return;
+    }
+    // The hook list is also used to restore every PLT hook on unload. Drop the
+    // entry now, otherwise unload would register the (already original) pointer
+    // again and keep lsplt's backup mapping alive for the whole process.
+    plt_hook_list->erase(
+            std::remove_if(plt_hook_list->begin(), plt_hook_list->end(),
+                           [](auto &t) { return strcmp(std::get<2>(t), "strdup") == 0; }),
             plt_hook_list->end());
 }
 

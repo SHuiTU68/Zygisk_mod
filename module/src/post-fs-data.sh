@@ -7,6 +7,9 @@ fi
 
 cd "$MODDIR"
 
+# Migrate the legacy "keep module dir mounted" toggle used by older builds.
+[ -f "$MODDIR/noable" ] && mv -f "$MODDIR/noable" "$MODDIR/.disable_unmount" 2>/dev/null
+
 if [ "$(which magisk)" ]; then
   for file in ../*; do
     if [ -d "$file" ] && [ -d "$file/zygisk" ] && ! [ -f "$file/disable" ]; then
@@ -26,10 +29,9 @@ create_sys_perm() {
   chcon u:object_r:system_file:s0 $1
 }
 
-export TMP_PATH=/sbin
-[ -d /sbin ] || export TMP_PATH=/debug_ramdisk
-[ ! -e /data/adb/litemode ] || export TMP_PATH=/dev/net0
-export TMP_PATH=/dev/net0
+# Keep the loader in a hidden tmpfs directory. `/dev/net0` was a well-known
+# fingerprint used by several Zygisk detectors.
+export TMP_PATH=/dev/.zsu
 
 create_sys_perm $TMP_PATH
 

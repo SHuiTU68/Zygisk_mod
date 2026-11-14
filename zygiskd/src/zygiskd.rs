@@ -4,9 +4,9 @@ use crate::{constants, lp_select, root_impl, utils};
 use anyhow::{bail, Result};
 use log::{debug, error, info, trace, warn};
 use passfd::FdPassingExt;
-use rustix::fs::{fcntl_setfd, FdFlags};
+use rustix::io::{fcntl_setfd, FdFlags};
 use std::fs;
-use std::io::Error;
+use std::io::{Error, Read};
 use std::ops::Deref;
 use std::os::fd::{AsFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -159,9 +159,25 @@ fn load_modules(arch: &str) -> Result<Vec<Module>> {
     Ok(modules)
 }
 
+fn random_memfd_name() -> String {
+    // A stable name such as "jit-cache" becomes a reliable fingerprint in
+    // /proc/<pid>/maps. Randomize it per module load instead.
+    let mut bytes = [0u8; 8];
+    if let Ok(mut f) = fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut bytes);
+    }
+    let mut name = String::with_capacity(20);
+    name.push_str("jit-");
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(name, "{b:02x}");
+    }
+    name
+}
+
 fn create_library_fd(so_path: &PathBuf) -> Result<OwnedFd> {
     let opts = memfd::MemfdOptions::default().allow_sealing(true);
-    let memfd = opts.create("jit-cache")?;
+    let memfd = opts.create(random_memfd_name())?;
     let file = fs::File::open(so_path)?;
     let mut reader = std::io::BufReader::new(file);
     let mut writer = memfd.as_file();
@@ -249,6 +265,9 @@ fn handle_daemon_action(
                 }
                 if root_impl::uid_should_umount(uid) {
                     flags |= ProcessFlags::PROCESS_ON_DENYLIST;
+                    if std::path::Path::new(constants::PATH_CONTROL_DISABLE_UNMOUNT).exists() {
+                        flags |= ProcessFlags::PROCESS_DISABLE_UNMOUNT;
+                    }
                 }
             }
             match root_impl::get_impl() {

@@ -9,7 +9,9 @@ void *self_handle = nullptr;
 
 extern "C" [[gnu::visibility("default")]]
 void entry(void* handle, const char* path) {
+#ifndef NDEBUG
     LOGI("Zygisk library injected, version %s", ZKSU_VERSION);
+#endif
     self_handle = handle;
     zygiskd::Init(path);
 

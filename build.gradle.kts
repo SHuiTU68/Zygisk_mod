@@ -30,12 +30,12 @@ val minMagiskVersion by extra(26402)
 val minApatchVersion by extra(10655)
 
 val androidMinSdkVersion by extra(26)
-val androidTargetSdkVersion by extra(34)
-val androidCompileSdkVersion by extra(34)
-val androidBuildToolsVersion by extra("34.0.0")
-val androidCompileNdkVersion by extra("26.0.10792818")
-val androidSourceCompatibility by extra(JavaVersion.VERSION_11)
-val androidTargetCompatibility by extra(JavaVersion.VERSION_11)
+val androidTargetSdkVersion by extra(36)
+val androidCompileSdkVersion by extra(36)
+val androidBuildToolsVersion by extra("36.0.0")
+val androidCompileNdkVersion by extra("28.2.13676358")
+val androidSourceCompatibility by extra(JavaVersion.VERSION_17)
+val androidTargetCompatibility by extra(JavaVersion.VERSION_17)
 
 tasks.register("Delete", Delete::class) {
     delete(rootProject.buildDir)

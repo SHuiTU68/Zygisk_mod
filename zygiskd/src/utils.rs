@@ -1,7 +1,6 @@
 use anyhow::Result;
 use rustix::net::{
-    bind_unix, connect_unix, listen, sendto_unix, socket, AddressFamily, SendFlags, SocketAddrUnix,
-    SocketType,
+    bind, connect, listen, sendto, socket, AddressFamily, SendFlags, SocketAddrUnix, SocketType,
 };
 use rustix::path::Arg;
 use rustix::thread::gettid;
@@ -216,7 +215,7 @@ pub fn unix_listener_from_path(path: &str) -> Result<UnixListener> {
     let _ = fs::remove_file(path);
     let addr = SocketAddrUnix::new(path)?;
     let socket = socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
-    bind_unix(&socket, &addr)?;
+    bind(&socket, &addr)?;
     listen(&socket, 2)?;
     chcon(path, "u:object_r:magisk_file:s0")?;
     Ok(UnixListener::from(socket))
@@ -227,8 +226,8 @@ pub fn unix_datagram_sendto(path: &str, buf: &[u8]) -> Result<()> {
     set_socket_create_context(get_current_attr()?.as_str())?;
     let addr = SocketAddrUnix::new(path.as_bytes())?;
     let socket = socket(AddressFamily::UNIX, SocketType::DGRAM, None)?;
-    connect_unix(&socket, &addr)?;
-    sendto_unix(socket, buf, SendFlags::empty(), &addr)?;
+    connect(&socket, &addr)?;
+    sendto(socket, buf, SendFlags::empty(), &addr)?;
     set_socket_create_context("u:r:zygote:s0")?;
     Ok(())
 }

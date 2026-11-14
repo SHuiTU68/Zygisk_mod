@@ -20,11 +20,15 @@ namespace lsplant::art {
 
         static art::ArtMethod *FromReflectedMethod(JNIEnv *env, jobject method) {
             if (art_method_field) [[likely]] {
-                return reinterpret_cast<art::ArtMethod *>(
+                auto *art_method = reinterpret_cast<art::ArtMethod *>(
                         JNI_GetLongField(env, method, art_method_field));
-            } else {
-                return reinterpret_cast<art::ArtMethod *>(env->FromReflectedMethod(method));
+                if (art_method) [[likely]] {
+                    return art_method;
+                }
             }
+            // Android 15/16 still expose Executable.artMethod, but keep the
+            // public JNI path as a fallback for vendor ART forks.
+            return reinterpret_cast<art::ArtMethod *>(env->FromReflectedMethod(method));
         }
 
         static bool Init(JNIEnv *env) {
@@ -60,8 +64,27 @@ namespace lsplant::art {
             auto &second_ctor = constructors[1];
             auto *first = FromReflectedMethod(env, first_ctor.get());
             auto *second = FromReflectedMethod(env, second_ctor.get());
-            art_method_size = reinterpret_cast<uintptr_t>(second) - reinterpret_cast<uintptr_t>(first);
+            if (first == nullptr || second == nullptr) {
+                LOGE("Failed to resolve ArtMethod size");
+                return false;
+            }
+            // The two constructors are adjacent in the class's ArtMethod array,
+            // but their order is not guaranteed. Use an absolute delta.
+            const auto first_addr = reinterpret_cast<uintptr_t>(first);
+            const auto second_addr = reinterpret_cast<uintptr_t>(second);
+            art_method_size = first_addr > second_addr ? first_addr - second_addr
+                                                       : second_addr - first_addr;
             LOGD("ArtMethod size: %zu", art_method_size);
+
+            // ArtMethod ends with `data_` followed by
+            // `entry_point_from_quick_compiled_code_` on every release from
+            // Android 7 through Android 16. Reject implausible layouts instead
+            // of writing through a bogus offset.
+            if (art_method_size < 4 * kPointerSize || art_method_size > 256 ||
+                art_method_size % kPointerSize != 0) [[unlikely]] {
+                LOGE("Unexpected ArtMethod size: %zu", art_method_size);
+                return false;
+            }
             if (RoundUpTo(4 * 9, kPointerSize) + kPointerSize * 3 < art_method_size) [[unlikely]] {
                 LOGW("ArtMethod size exceeds maximum assume. There may be something wrong.");
             }

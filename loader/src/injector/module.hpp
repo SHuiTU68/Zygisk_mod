@@ -131,7 +131,10 @@ namespace {
         PROCESS_ROOT_IS_MAGISK = (1u << 30),
         PROCESS_IS_SYS_UI = (1u << 31),
 
-        PRIVATE_MASK = PROCESS_IS_SYS_UI
+        // Internal flag passed from zygiskd, never exposed to modules.
+        PROCESS_DISABLE_UNMOUNT = (1u << 26),
+
+        PRIVATE_MASK = PROCESS_IS_SYS_UI | PROCESS_DISABLE_UNMOUNT
     };
 
     struct api_abi_base {
@@ -181,6 +184,7 @@ case 2: {                              \
 }                                      \
 case 3:                                \
 case 4:                                \
+case 5:                                \
     mod.v1->method(mod.v1->impl, args);\
     break;                             \
 }
