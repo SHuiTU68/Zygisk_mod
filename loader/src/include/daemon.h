@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 #include <string>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #if defined(__LP64__)
@@ -51,6 +53,15 @@ namespace zygiskd {
         inline explicit Module(std::string name, int memfd) : name(name), memfd(memfd) {}
     };
 
+    struct ZnModuleEntry {
+        std::string path;
+        UniqueFd memfd;
+        bool companion = false;
+
+        inline ZnModuleEntry(std::string path, int memfd, bool companion)
+                : path(std::move(path)), memfd(memfd), companion(companion) {}
+    };
+
     enum class SocketAction {
         PingHeartBeat,
         RequestLogcatFd,
@@ -60,6 +71,9 @@ namespace zygiskd {
         GetModuleDir,
         ZygoteRestart,
         SystemServerStarted,
+        GetZnPlan,
+        ReportZnModule,
+        RequestZnCompanionSocket,
     };
 
     void Init(const char *path);
@@ -81,4 +95,11 @@ namespace zygiskd {
     void ZygoteRestart();
 
     void SystemServerStarted();
+
+    // Zygisk Next module support.
+    std::vector<ZnModuleEntry> GetZnPlan(const std::string &process, const std::string &path);
+
+    void ReportZnModule(const std::string &path, bool injected);
+
+    int ConnectZnCompanion(const std::string &path);
 }

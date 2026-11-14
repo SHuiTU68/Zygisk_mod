@@ -52,9 +52,13 @@ android {
     }
 
     defaultConfig {
+        // This module only targets 64-bit zygote/app_process.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
         externalNativeBuild.cmake {
             arguments += "-DANDROID_STL=none"
-            arguments += "-DLSPLT_STANDALONE=ON"
             cFlags("-std=c18", *defaultCFlags)
             cppFlags("-std=c++20", *defaultCFlags)
             ccachePath?.let {

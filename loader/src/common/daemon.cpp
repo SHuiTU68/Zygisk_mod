@@ -153,4 +153,51 @@ namespace zygiskd {
             }
         }
     }
+
+    std::vector<ZnModuleEntry> GetZnPlan(const std::string &process, const std::string &path) {
+        std::vector<ZnModuleEntry> plan;
+        UniqueFd fd = Connect(1);
+        if (fd == -1) {
+            PLOGE("GetZnPlan");
+            return plan;
+        }
+        socket_utils::write_u8(fd, (uint8_t) SocketAction::GetZnPlan);
+        socket_utils::write_string(fd, process);
+        socket_utils::write_string(fd, path);
+
+        size_t len = socket_utils::read_usize(fd);
+        for (size_t i = 0; i < len; i++) {
+            std::string lib_path = socket_utils::read_string(fd);
+            uint8_t companion = socket_utils::read_u8(fd);
+            int module_fd = socket_utils::recv_fd(fd);
+            plan.emplace_back(std::move(lib_path), module_fd, companion != 0);
+        }
+        return plan;
+    }
+
+    void ReportZnModule(const std::string &path, bool injected) {
+        UniqueFd fd = Connect(1);
+        if (fd == -1) {
+            PLOGE("ReportZnModule");
+            return;
+        }
+        socket_utils::write_u8(fd, (uint8_t) SocketAction::ReportZnModule);
+        socket_utils::write_string(fd, path);
+        socket_utils::write_u8(fd, injected ? 1 : 0);
+    }
+
+    int ConnectZnCompanion(const std::string &path) {
+        int fd = Connect(1);
+        if (fd == -1) {
+            PLOGE("ConnectZnCompanion");
+            return -1;
+        }
+        socket_utils::write_u8(fd, (uint8_t) SocketAction::RequestZnCompanionSocket);
+        socket_utils::write_string(fd, path);
+        if (socket_utils::read_u8(fd) == 1) {
+            return fd;
+        }
+        close(fd);
+        return -1;
+    }
 }

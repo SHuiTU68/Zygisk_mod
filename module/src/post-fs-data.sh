@@ -41,11 +41,5 @@ if [ -f $MODDIR/lib64/libzygisk.so ];then
   chcon u:object_r:system_file:s0 $TMP_PATH/lib64/libzygisk.so
 fi
 
-if [ -f $MODDIR/lib/libzygisk.so ];then
-  create_sys_perm $TMP_PATH/lib
-  cp $MODDIR/lib/libzygisk.so $TMP_PATH/lib/libzygisk.so
-  chcon u:object_r:system_file:s0 $TMP_PATH/lib/libzygisk.so
-fi
-
 [ "$DEBUG" = true ] && export RUST_BACKTRACE=1
 ./bin/zygisk-ptrace64 monitor &

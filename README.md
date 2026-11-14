@@ -33,9 +33,17 @@ Standalone implementation of Zygisk, providing Zygisk API support for KernelSU,A
 ## Compatibility
 
 + Android 8.0 - Android 16 (API 26 - 36), including 16 KB page-size devices
++ **64-bit only**: only `arm64-v8a` is built and only the 64-bit Zygote
+  (`app_process64`) is injected. 32-bit Zygote, x86 and x86_64 are not supported.
 + Built with AGP 8.13, Gradle 8.13, JDK 17 and Android NDK r28
 + Zygisk API v5 (`mount_sysprop_overrides` and the Android 15/16 Zygote signatures)
-+ `lsplt` updated to the latest upstream (Android 16 / 16 KB page support)
++ In-house hook engine (PLT/GOT relocation hooks + arm64 inline hooks + ELF
+  symbol resolver) replaces the former `lsplt` dependency
++ Zygisk Next modules: `zn_modules.txt` loading and the ZN API v4
+  (`pltHook` / `inlineHook` / symbol resolver / `connectCompanion`) are
+  supported for modules targeting `zygote`/`app_process`. Modules selected by
+  an app package name or an arbitrary process path are not injected, because
+  this module does not perform per-app secondary injection.
 
 `PROCESS_ON_DENYLIST` cannot be flagged correctly for isolated processes on Magisk DenyList currently.
 
@@ -52,8 +60,9 @@ implementation:
 + the loader itself is mapped by an in-tree ELF linker instead of the system
   linker, so it never shows up in `soinfo`/`dl_iterate_phdr()`; the mappings
   are anonymous and named like ART JIT/DEX regions. Images that need TLS or
-  Android packed relocations automatically fall back to `dlopen`, and arm32
-  zygotes keep using `dlopen`
+  Android packed relocations automatically fall back to `dlopen`
++ hooks are installed by the in-house engine instead of `lsplt`; only the
+  64-bit process image is parsed
 + the one-shot `strdup` PLT hook is removed after the Zygote JNI hooks are
   installed
 + inherited file descriptors are no longer mass-closed, defeating the

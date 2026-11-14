@@ -43,6 +43,9 @@ pub enum DaemonSocketAction {
     GetModuleDir,
     ZygoteRestart,
     SystemServerStarted,
+    GetZnPlan,
+    ReportZnModule,
+    RequestZnCompanionSocket,
 }
 
 // Zygisk process flags

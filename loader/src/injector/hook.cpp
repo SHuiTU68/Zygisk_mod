@@ -1,4 +1,3 @@
-#include <android/dlext.h>
 #include <sys/mount.h>
 #include <dlfcn.h>
 #include <regex.h>
@@ -9,7 +8,7 @@
 #include <cstring>
 #include <cerrno>
 
-#include <lsplt.hpp>
+#include "hook_engine.hpp"
 
 #include <fcntl.h>
 #include <sys/prctl.h>
@@ -289,7 +288,7 @@ bool initialize_jni_hook() {
     auto get_created_java_vms = reinterpret_cast<jint (*)(JavaVM **, jsize, jsize *)>(
             dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs"));
     if (!get_created_java_vms) {
-        for (auto &map: lsplt::MapInfo::Scan()) {
+        for (auto &map: hook_engine::MapInfo::Scan()) {
             if (!map.path.ends_with("/libnativehelper.so")) continue;
             void *h = dlopen(map.path.data(), RTLD_LAZY);
             if (!h) {
@@ -371,11 +370,11 @@ bool ZygiskModule::RegisterModuleImpl(ApiTable *api, long *module) {
         api->v2.getFlags = [](auto) { return ZygiskModule::getFlags(); };
     }
     if (api_version >= 4) {
-        api->v4.pltHookCommit = lsplt::CommitHook;
+        api->v4.pltHookCommit = hook_engine::CommitHook;
         api->v4.pltHookRegister = [](dev_t dev, ino_t inode, const char *symbol, void *fn, void **backup) {
             if (dev == 0 || inode == 0 || symbol == nullptr || fn == nullptr)
                 return;
-            lsplt::RegisterHook(dev, inode, symbol, fn, backup);
+            hook_engine::RegisterHook(dev, inode, symbol, fn, backup);
         };
         api->v4.exemptFd = [](int fd) { return g_ctx && g_ctx->exempt_fd(fd); };
     }
@@ -405,7 +404,7 @@ void ZygiskContext::plt_hook_exclude(const char *regex, const char *symbol) {
 void ZygiskContext::plt_hook_process_regex() {
     if (register_info.empty())
         return;
-    for (auto &map : lsplt::MapInfo::Scan()) {
+    for (auto &map : hook_engine::MapInfo::Scan()) {
         if (map.offset != 0 || !map.is_private || !(map.perms & PROT_READ)) continue;
         for (auto &reg: register_info) {
             if (regexec(&reg.regex, map.path.data(), 0, nullptr, 0) != 0)
@@ -420,7 +419,7 @@ void ZygiskContext::plt_hook_process_regex() {
                 }
             }
             if (!ignored) {
-                lsplt::RegisterHook(map.dev, map.inode, reg.symbol, reg.callback, reg.backup);
+                hook_engine::RegisterHook(map.dev, map.inode, reg.symbol, reg.callback, reg.backup);
             }
         }
     }
@@ -433,7 +432,7 @@ bool ZygiskContext::plt_hook_commit() {
         register_info.clear();
         ignore_info.clear();
     }
-    return lsplt::CommitHook();
+    return hook_engine::CommitHook();
 }
 
 
@@ -725,7 +724,7 @@ ZygiskContext::~ZygiskContext() {
 } // namespace
 
 static bool hook_commit() {
-    if (lsplt::CommitHook()) {
+    if (hook_engine::CommitHook()) {
         return true;
     } else {
         LOGE("plt_hook failed\n");
@@ -734,7 +733,7 @@ static bool hook_commit() {
 }
 
 static void hook_register(dev_t dev, ino_t inode, const char *symbol, void *new_func, void **old_func) {
-    if (!lsplt::RegisterHook(dev, inode, symbol, new_func, old_func)) {
+    if (!hook_engine::RegisterHook(dev, inode, symbol, new_func, old_func)) {
         LOGE("Failed to register plt_hook \"%s\"\n", symbol);
         return;
     }
@@ -751,7 +750,7 @@ void hook_functions() {
     default_new(plt_hook_list);
     default_new(jni_hook_list);
 
-    for (auto &map : lsplt::MapInfo::Scan()) {
+    for (auto &map : hook_engine::MapInfo::Scan()) {
         if (map.path.ends_with("libandroid_runtime.so")) {
             android_runtime_inode = map.inode;
             android_runtime_dev = map.dev;
@@ -779,7 +778,7 @@ void hook_functions() {
 static void spoof_virtual_maps(const char *needle) {
     if (needle == nullptr || *needle == '\0') return;
 
-    for (auto &map : lsplt::MapInfo::Scan()) {
+    for (auto &map : hook_engine::MapInfo::Scan()) {
         if (map.path.find(needle) == std::string::npos) continue;
 
         const size_t size = map.end - map.start;
@@ -823,17 +822,18 @@ static void spoof_virtual_maps(const char *needle) {
 
 static void restore_strdup_hook() {
     if (android_runtime_inode == 0 || old_strdup == nullptr) return;
-    if (!lsplt::RegisterHook(android_runtime_dev, android_runtime_inode, "strdup",
+    if (!hook_engine::RegisterHook(android_runtime_dev, android_runtime_inode, "strdup",
                              reinterpret_cast<void *>(old_strdup), nullptr)) {
         return;
     }
-    if (!lsplt::CommitHook()) {
+    if (!hook_engine::CommitHook()) {
         LOGW("failed to commit strdup unhook\n");
         return;
     }
     // The hook list is also used to restore every PLT hook on unload. Drop the
     // entry now, otherwise unload would register the (already original) pointer
-    // again and keep lsplt's backup mapping alive for the whole process.
+    // again and keep the hook engine's backup mapping alive for the whole
+    // process.
     plt_hook_list->erase(
             std::remove_if(plt_hook_list->begin(), plt_hook_list->end(),
                            [](auto &t) { return strcmp(std::get<2>(t), "strdup") == 0; }),
@@ -844,7 +844,7 @@ static void hook_unloader() {
     ino_t art_inode = 0;
     dev_t art_dev = 0;
 
-    for (auto &map : lsplt::MapInfo::Scan()) {
+    for (auto &map : hook_engine::MapInfo::Scan()) {
         if (map.path.ends_with("/libart.so")) {
             art_inode = map.inode;
             art_dev = map.dev;
@@ -859,7 +859,7 @@ static void hook_unloader() {
 static void unhook_functions() {
     // Unhook plt_hook
     for (const auto &[dev, inode, sym, old_func] : *plt_hook_list) {
-        if (!lsplt::RegisterHook(dev, inode, sym, *old_func, nullptr)) {
+        if (!hook_engine::RegisterHook(dev, inode, sym, *old_func, nullptr)) {
             LOGE("Failed to register plt_hook [%s]\n", sym);
         }
     }

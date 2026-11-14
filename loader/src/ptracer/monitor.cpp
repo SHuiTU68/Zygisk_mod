@@ -122,7 +122,6 @@ struct Status {
 };
 
 static Status status64;
-static Status status32;
 
 struct SocketHandler : public EventHandler {
     int sock_fd_;
@@ -229,30 +228,15 @@ struct SocketHandler : public EventHandler {
                     status64.zygote_injected = true;
                     updateStatus();
                     break;
-                case ZYGOTE32_INJECTED:
-                    status32.zygote_injected = true;
-                    updateStatus();
-                    break;
                 case DAEMON64_SET_INFO:
                     LOGD("received daemon64 info %s", msg.data);
                     status64.daemon_info = std::string(msg.data);
-                    updateStatus();
-                    break;
-                case DAEMON32_SET_INFO:
-                    LOGD("received daemon32 info %s", msg.data);
-                    status32.daemon_info = std::string(msg.data);
                     updateStatus();
                     break;
                 case DAEMON64_SET_ERROR_INFO:
                     LOGD("received daemon64 error info %s", msg.data);
                     status64.daemon_running = false;
                     status64.daemon_error_info = std::string(msg.data);
-                    updateStatus();
-                    break;
-                case DAEMON32_SET_ERROR_INFO:
-                    LOGD("received daemon32 error info %s", msg.data);
-                    status32.daemon_running = false;
-                    status32.daemon_error_info = std::string(msg.data);
                     updateStatus();
                     break;
                 case SYSTEM_SERVER_STARTED:
@@ -288,25 +272,20 @@ bool should_stop_inject##abi() { \
 }
 
 CREATE_ZYGOTE_START_COUNTER(64)
-CREATE_ZYGOTE_START_COUNTER(32)
 
-static bool ensure_daemon_created(bool is_64bit) {
-    auto &status = is_64bit ? status64 : status32;
-    if (is_64bit) {
-        LOGD("new zygote started, unmounting prop ...");
-        umount2("/data/adb/modules/admirepowered/module.prop", MNT_DETACH);
-    }
+static bool ensure_daemon_created() {
+    auto &status = status64;
+    LOGD("new zygote started, unmounting prop ...");
+    umount2("/data/adb/modules/admirepowered/module.prop", MNT_DETACH);
     status.zygote_injected = false;
     if (status.daemon_pid == -1) {
         auto pid = fork();
         if (pid < 0) {
-            PLOGE("create daemon (64=%s)", is_64bit ? "true" : "false");
+            PLOGE("create daemon");
             return false;
         } else if (pid == 0) {
-            std::string daemon_name = "./bin/zygiskd";
-            daemon_name += is_64bit ? "64" : "32";
-            execl(daemon_name.c_str(), daemon_name.c_str(), nullptr);
-            PLOGE("exec daemon %s failed", daemon_name.c_str());
+            execl("./bin/zygiskd64", "zygiskd64", nullptr);
+            PLOGE("exec daemon failed");
             exit(1);
         } else {
             status.supported = true;
@@ -398,19 +377,16 @@ public:
                     }
                     continue;
                 }
-#define CHECK_DAEMON_EXIT(abi) \
-                if (status##abi.supported && pid == status64.daemon_pid) { \
-                    auto status_str = parse_status(status); \
-                    LOGW("daemon" #abi "pid %d exited: %s", pid, status_str.c_str()); \
-                    status##abi.daemon_running = false; \
-                    if (status##abi.daemon_error_info.empty()) { \
-                        status##abi.daemon_error_info = status_str; \
-                    } \
-                    updateStatus(); \
-                    continue; \
+                if (status64.supported && pid == status64.daemon_pid) {
+                    auto status_str = parse_status(status);
+                    LOGW("daemon64 pid %d exited: %s", pid, status_str.c_str());
+                    status64.daemon_running = false;
+                    if (status64.daemon_error_info.empty()) {
+                        status64.daemon_error_info = status_str;
+                    }
+                    updateStatus();
+                    continue;
                 }
-                CHECK_DAEMON_EXIT(64)
-                CHECK_DAEMON_EXIT(32)
                 auto state = process.find(pid);
                 if (state == process.end()) {
                     LOGV("new process %d attached", pid);
@@ -428,26 +404,24 @@ public:
                                 LOGW("stop injecting %d because not tracing", pid);
                                 break;
                             }
-#define PRE_INJECT(abi, is_64) \
-                            if (program == "/system/bin/app_process"#abi) { \
-                                tracer = "./bin/zygisk-ptrace"#abi; \
-                                if (should_stop_inject##abi()) { \
-                                    LOGW("zygote" #abi " restart too much times, stop injecting"); \
-                                    tracing_state = STOPPING; \
-                                    monitor_stop_reason = "zygote crashed"; \
-                                    ptrace(PTRACE_INTERRUPT, 1, 0, 0); \
-                                    break; \
-                                } \
-                                if (!ensure_daemon_created(is_64)) { \
-                                    LOGW("daemon" #abi " not running, stop injecting"); \
-                                    tracing_state = STOPPING; \
-                                    monitor_stop_reason = "daemon not running"; \
-                                    ptrace(PTRACE_INTERRUPT, 1, 0, 0); \
-                                    break; \
-                                } \
+                            // Only the 64-bit zygote is supported.
+                            if (program == "/system/bin/app_process64") {
+                                tracer = "./bin/zygisk-ptrace64";
+                                if (should_stop_inject64()) {
+                                    LOGW("zygote64 restart too much times, stop injecting");
+                                    tracing_state = STOPPING;
+                                    monitor_stop_reason = "zygote crashed";
+                                    ptrace(PTRACE_INTERRUPT, 1, 0, 0);
+                                    break;
+                                }
+                                if (!ensure_daemon_created()) {
+                                    LOGW("daemon64 not running, stop injecting");
+                                    tracing_state = STOPPING;
+                                    monitor_stop_reason = "daemon not running";
+                                    ptrace(PTRACE_INTERRUPT, 1, 0, 0);
+                                    break;
+                                }
                             }
-                            PRE_INJECT(64, true)
-                            PRE_INJECT(32, false)
                             if (tracer != nullptr) {
                                 LOGD("stopping %d", pid);
                                 kill(pid, SIGSTOP);
@@ -500,10 +474,8 @@ static void updateStatus() {
     std::int8_t state=0;
     std::int8_t state1=0;
     std::int8_t state2=0;
-    std::int8_t state32=0;
     std::int8_t state64=0;
     std::string status_text = "monitor:";
-    std::string in32="";
     std::string in64="";
     std::string out="";
     switch (tracing_state) {
@@ -550,10 +522,9 @@ static void updateStatus() {
         } \
     }
     WRITE_STATUS_ABI(64)
-    WRITE_STATUS_ABI(32)
 
     fprintf(prop.get(), "%s[%s] %s", pre_section.c_str(), status_text.c_str(), post_section.c_str());
-    fprintf(info.get(),"{\"a\":%d,\"b\":%d,\"p32\":%d,\"p64\":%d,\"in32\":\"%s\",\"in64\":\"%s\",\"out\":\"%s\"}",state,state1,state32,state64,in32.c_str(),in64.c_str(),out.c_str());
+    fprintf(info.get(),"{\"a\":%d,\"b\":%d,\"p32\":%d,\"p64\":%d,\"in32\":\"%s\",\"in64\":\"%s\",\"out\":\"%s\"}",state,state1,0,state64,"",in64.c_str(),out.c_str());
 }
 
 static bool prepare_environment() {

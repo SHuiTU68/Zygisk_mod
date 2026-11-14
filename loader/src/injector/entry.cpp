@@ -2,6 +2,7 @@
 #include "logging.h"
 #include "zygisk.hpp"
 #include "module.hpp"
+#include "zn_loader.hpp"
 
 using namespace std;
 
@@ -26,4 +27,7 @@ void entry(void* handle, const char* path) {
 
     LOGI("Start hooking");
     hook_functions();
+
+    // Load Zygisk Next modules that target the zygote/app_process process.
+    zn::load_all_modules();
 }

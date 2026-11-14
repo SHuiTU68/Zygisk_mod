@@ -117,7 +117,7 @@ androidComponents.onVariants { variant ->
                     }
                 }
 
-                fun getSign(name: String, abi32: String, abi64: String) {
+                fun getSign(name: String, abi64: String) {
                     val set = TreeSet<Pair<File, File?>> { o1, o2 ->
                         o1.first.path.replace("\\", "/")
                             .compareTo(o2.first.path.replace("\\", "/"))
@@ -129,32 +129,14 @@ androidComponents.onVariants { variant ->
                     set.add(Pair(root.file("mazoku").asFile, null))
                     set.add(
                         Pair(
-                            root.file("lib/libzygisk.so").asFile,
-                            root.file("lib/$abi32/libzygisk.so").asFile
-                        )
-                    )
-                    set.add(
-                        Pair(
                             root.file("lib64/libzygisk.so").asFile,
                             root.file("lib/$abi64/libzygisk.so").asFile
                         )
                     )
                     set.add(
                         Pair(
-                            root.file("bin/zygisk-ptrace32").asFile,
-                            root.file("lib/$abi32/libzygisk_ptrace.so").asFile
-                        )
-                    )
-                    set.add(
-                        Pair(
                             root.file("bin/zygisk-ptrace64").asFile,
                             root.file("lib/$abi64/libzygisk_ptrace.so").asFile
-                        )
-                    )
-                    set.add(
-                        Pair(
-                            root.file("bin/zygiskd32").asFile,
-                            root.file("bin/$abi32/zygiskd").asFile
                         )
                     )
                     set.add(
@@ -176,12 +158,11 @@ androidComponents.onVariants { variant ->
                     signFile.appendBytes(publicKey)
                 }
 
-                getSign("machikado.arm", "armeabi-v7a", "arm64-v8a")
-                getSign("machikado.x86", "x86", "x86_64")
+                // The module only ships and injects 64-bit (arm64-v8a) binaries.
+                getSign("machikado.arm", "arm64-v8a")
             } else {
                 println("no private_key found, this build will not be signed")
                 root.file("machikado.arm").asFile.createNewFile()
-                root.file("machikado.x86").asFile.createNewFile()
             }
 
             fileTree(moduleDir).visit {

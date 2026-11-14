@@ -3,6 +3,7 @@ mod constants;
 mod dl;
 mod root_impl;
 mod utils;
+mod zn_companion;
 mod zygiskd;
 use std::fs;
 use std::path::Path;
@@ -21,6 +22,10 @@ fn start() {
     if args.len() == 3 && args[1] == "companion" {
         let fd: i32 = args[2].parse().unwrap();
         companion::entry(fd);
+        return;
+    } else if args.len() == 4 && args[1] == "zn-companion" {
+        let fd: i32 = args[3].parse().unwrap();
+        zn_companion::entry(&args[2], fd);
         return;
     } else if args.len() == 2 && args[1] == "version" {
         println!("Zygisk Next daemon {}", ZKSU_VERSION);
