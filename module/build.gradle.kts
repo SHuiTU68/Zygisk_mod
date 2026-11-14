@@ -1,4 +1,5 @@
 import android.databinding.tool.ext.capitalizeUS
+import org.gradle.api.file.RelativePath
 import java.security.MessageDigest
 import org.apache.tools.ant.filters.ReplaceTokens
 
@@ -44,6 +45,11 @@ androidComponents.onVariants { variant ->
     val moduleDir = layout.buildDirectory.dir("outputs/module/$variantLowered")
     val zipFileName = "$moduleName-$verName-$verCode-$commitHash-$buildTypeLowered.zip".replace(' ', '-')
 
+    // The stripped libraries live under an AGP-internal, task-specific directory.
+    // Read the strip task output directly instead of hardcoding the intermediate
+    // path, which changes between AGP versions.
+    val loaderStripTask = project(":loader").tasks.named("strip${variantCapped}DebugSymbols")
+
     val prepareModuleFilesTask = task<Sync>("prepareModuleFiles$variantCapped") {
         group = "module"
         dependsOn(
@@ -86,8 +92,12 @@ androidComponents.onVariants { variant ->
             from(project(":zygiskd").layout.buildDirectory.file("rustJniLibs/android"))
             include("**/zygiskd")
         }
-        into("lib") {
-            from(project(":loader").layout.buildDirectory.file("intermediates/stripped_native_libs/$variantLowered/out/lib"))
+        from(loaderStripTask) {
+            include("**/*.so")
+            eachFile {
+                relativePath = RelativePath(true, "lib", "arm64-v8a", name)
+            }
+            includeEmptyDirs = false
         }
 
         val root = moduleDir.get()
