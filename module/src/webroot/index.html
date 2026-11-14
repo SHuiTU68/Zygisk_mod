@@ -67,8 +67,8 @@
 			</div>
 
 		</mdui-collapse-item>
-		<mdui-card style="width: 100px;height: 20px;text-align:right">开启强制卸载</mdui-card>
-		<mdui-switch checked=true></mdui-switch>
+		<mdui-card style="width: auto;height: 20px;text-align:right" id="denylist-mode">仅还原挂载</mdui-card>
+		<mdui-switch></mdui-switch>
 
 	</mdui-list>
 
@@ -80,20 +80,22 @@
   <script>
 
 	const witch = document.querySelector('mdui-switch');
+	const modeItem = document.getElementById('denylist-mode');
+	const ctl = '/data/adb/modules/admirepowered/bin/zygisk-ctl';
 	console.log(witch)
 	  // 设置 JavaScript 属性
 	  witch.variant = 'outlined';
+
+	  // 仅还原挂载(just_umount) 与 强制卸载(enforce) 二选一，共用一个开关
+	  function setDenylistMode(enforce) {
+			const mode = enforce ? 'enforce' : 'just_umount';
+			ksu.exec(ctl + ' denylist ' + mode);
+			witch.checked = enforce;
+			modeItem.textContent = enforce ? '强制卸载' : '仅还原挂载';
+	  }
+
 	  witch.addEventListener('click', () => {
-			//console.log('对话框开始打开时，会触发该事件');
-			//alert('Art')
-			console.log(witch.checked)
-			if (witch.checked){
-				info = ksu.exec('/data/adb/modules/admirepowered/bin/zygiskd64 dable');//关闭按钮
-				//alert(info);
-			}{
-				info = ksu.exec('/data/adb/modules/admirepowered/bin/zygiskd64 eable');//开启按钮
-				//alert(info);
-			}
+			setDenylistMode(witch.checked);
 	  });
 	  // 读取 JavaScript 属性
 	  console.log(witch.variant); // outlined
@@ -121,10 +123,10 @@
 		info = ksu.exec('/data/adb/modules/admirepowered/bin/zygiskd64 version');
 		item[1].textContent=info;
 
-		info = ksu.exec('/data/adb/modules/admirepowered/bin/zygiskd64 status');
-		if (info=="1"){
-			witch.checked=false;
-		}
+		info = ksu.exec(ctl + ' denylist');
+		const enforce = String(info).indexOf('enforce') !== -1;
+		witch.checked = enforce;
+		modeItem.textContent = enforce ? '强制卸载' : '仅还原挂载';
 
 		info = ksu.exec('cat /data/adb/modules/info.json');
 
