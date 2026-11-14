@@ -420,7 +420,8 @@ void ZygiskContext::plt_hook_process_regex() {
                 }
             }
             if (!ignored) {
-                hook_engine::RegisterHook(map.dev, map.inode, reg.symbol, reg.callback, reg.backup);
+                hook_engine::RegisterHook(map.dev, map.inode, reg.symbol.c_str(),
+                                          reg.callback, reg.backup);
             }
         }
     }
