@@ -67,8 +67,13 @@
 			</div>
 
 		</mdui-collapse-item>
-		<mdui-card style="width: auto;height: 20px;text-align:right" id="denylist-mode">仅还原挂载</mdui-card>
-		<mdui-switch></mdui-switch>
+		<div style="display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; min-height: 3.5rem">
+			<span>排除列表</span>
+			<mdui-select id="denylist-mode" value="just_umount" style="width: 9rem">
+				<mdui-menu-item value="just_umount">仅还原挂载</mdui-menu-item>
+				<mdui-menu-item value="enforce">强制卸载</mdui-menu-item>
+			</mdui-select>
+		</div>
 
 	</mdui-list>
 
@@ -79,26 +84,19 @@
   </body>
   <script>
 
-	const witch = document.querySelector('mdui-switch');
-	const modeItem = document.getElementById('denylist-mode');
+	const modeSelect = document.getElementById('denylist-mode');
 	const ctl = '/data/adb/modules/admirepowered/bin/zygisk-ctl';
-	console.log(witch)
-	  // 设置 JavaScript 属性
-	  witch.variant = 'outlined';
 
-	  // 仅还原挂载(just_umount) 与 强制卸载(enforce) 二选一，共用一个开关
-	  function setDenylistMode(enforce) {
-			const mode = enforce ? 'enforce' : 'just_umount';
-			ksu.exec(ctl + ' denylist ' + mode);
-			witch.checked = enforce;
-			modeItem.textContent = enforce ? '强制卸载' : '仅还原挂载';
-	  }
+	// 仅还原挂载(just_umount) 与 强制卸载(enforce) 二选一
+	function setDenylistMode(mode) {
+		if (mode !== 'enforce' && mode !== 'just_umount') return;
+		ksu.exec(ctl + ' denylist ' + mode);
+	}
 
-	  witch.addEventListener('click', () => {
-			setDenylistMode(witch.checked);
-	  });
-	  // 读取 JavaScript 属性
-	  console.log(witch.variant); // outlined
+	modeSelect.addEventListener('change', () => {
+		setDenylistMode(modeSelect.value);
+	});
+	// 读取 JavaScript 属性
 	  const div = document.querySelectorAll('div');
 	  //div[2].innerHTML="<mdui-list-item>LSPosed                 - 😊</mdui-list-item>\n<mdui-list-item>LSPosed                 - 😊</mdui-list-item>"
 	  const item = document.querySelectorAll('mdui-list-item');
@@ -124,9 +122,7 @@
 		item[1].textContent=info;
 
 		info = ksu.exec(ctl + ' denylist');
-		const enforce = String(info).indexOf('enforce') !== -1;
-		witch.checked = enforce;
-		modeItem.textContent = enforce ? '强制卸载' : '仅还原挂载';
+		modeSelect.value = String(info).indexOf('enforce') !== -1 ? 'enforce' : 'just_umount';
 
 		info = ksu.exec('cat /data/adb/modules/info.json');
 
