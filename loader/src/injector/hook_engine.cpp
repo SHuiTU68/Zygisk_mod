@@ -120,12 +120,6 @@ namespace hook_engine {
             return base == UINTPTR_MAX ? 0 : base;
         }
 
-        uintptr_t ImageEnd(const std::vector<MapInfo> &maps) {
-            uintptr_t end = 0;
-            for (const auto &map: maps) end = std::max(end, map.end);
-            return end;
-        }
-
         struct DynamicInfo {
             uintptr_t symtab = 0;
             uintptr_t strtab = 0;
@@ -243,7 +237,8 @@ namespace hook_engine {
             return count;
         }
 
-        const char *SymbolName(const DynamicInfo &dyn, size_t index) {
+        const char *SymbolName(const DynamicInfo &dyn, size_t index, size_t symcount) {
+            if (symcount == 0 || index >= symcount) return nullptr;
             auto *sym = reinterpret_cast<const ElfW(Sym) *>(dyn.symtab + index * sizeof(ElfW(Sym)));
             if (sym->st_name == 0 || sym->st_name >= dyn.strsz) return nullptr;
             const char *name = reinterpret_cast<const char *>(dyn.strtab + sym->st_name);
@@ -259,10 +254,13 @@ namespace hook_engine {
                 LOGW("hook: mprotect(rw) failed at %" PRIxPTR ": %s", slot, strerror(errno));
                 return false;
             }
-            *reinterpret_cast<uintptr_t *>(slot) = value;
-            mprotect(reinterpret_cast<void *>(page), len, perms);
-            __builtin___clear_cache(reinterpret_cast<char *>(page),
-                                    reinterpret_cast<char *>(page + len));
+            // GOT entries are data: only a single aligned store is required, and
+            // no instruction cache maintenance is needed here.
+            __atomic_store_n(reinterpret_cast<uintptr_t *>(slot), value, __ATOMIC_RELEASE);
+            if (mprotect(reinterpret_cast<void *>(page), len, perms) != 0) {
+                LOGW("hook: mprotect restore failed at %" PRIxPTR ": %s",
+                     slot, strerror(errno));
+            }
             return true;
         }
 
@@ -273,7 +271,8 @@ namespace hook_engine {
 
         void ScanRelocs(const std::vector<MapInfo> &maps, uintptr_t base,
                         const DynamicInfo &dyn, uintptr_t table, size_t size,
-                        const char *symbol, std::vector<RelocationSlot> *slots) {
+                        size_t symcount, const char *symbol,
+                        std::vector<RelocationSlot> *slots) {
             if (table == 0 || size < sizeof(ElfW(Rela))) return;
             if (!IsReadable(maps, table, size)) return;
             size_t count = size / sizeof(ElfW(Rela));
@@ -288,7 +287,7 @@ namespace hook_engine {
 #else
                 continue;
 #endif
-                const char *name = SymbolName(dyn, sym_index);
+                const char *name = SymbolName(dyn, sym_index, symcount);
                 if (name == nullptr || strcmp(name, symbol) != 0) continue;
                 uintptr_t slot = base + rela[i].r_offset;
                 const MapInfo *map = FindMap(maps, slot, sizeof(uintptr_t), PROT_READ);
@@ -333,54 +332,66 @@ namespace hook_engine {
             return nullptr;
         }
 
-        bool ResolveOriginal(const std::vector<MapInfo> &maps, uintptr_t base,
-                             const char *symbol, uintptr_t slot_value, void **out) {
+        bool ResolveOriginal(const std::vector<MapInfo> &maps, const char *symbol,
+                             uintptr_t slot_value, void **out) {
+            // Prefer the address this GOT slot actually pointed at. A lazy PLT
+            // stub is a valid call target: calling it through BLR resolves the
+            // symbol and tail-calls the real implementation.
+            if (slot_value != 0 &&
+                FindMap(maps, slot_value, 1, PROT_EXEC) != nullptr) {
+                *out = reinterpret_cast<void *>(slot_value);
+                return true;
+            }
             void *resolved = dlsym(RTLD_DEFAULT, symbol);
             if (resolved != nullptr) {
                 *out = resolved;
                 return true;
             }
-            // The slot may still point at the lazy-binding resolver inside the
-            // image, in which case calling it directly would be unsafe.
-            uintptr_t end = ImageEnd(maps);
-            if (slot_value >= base && slot_value < end && end > base) {
-                return false;
+            return false;
+        }
+
+        bool WriteSlots(const std::vector<RelocationSlot> &slots,
+                        const std::vector<uintptr_t> &values) {
+            if (slots.size() != values.size()) return false;
+            std::vector<uintptr_t> before;
+            before.reserve(slots.size());
+            for (const auto &slot: slots) {
+                before.push_back(*reinterpret_cast<uintptr_t *>(slot.address));
             }
-            *out = reinterpret_cast<void *>(slot_value);
+            for (size_t i = 0; i < slots.size(); ++i) {
+                if (!PatchPointer(slots[i].address, values[i], slots[i].perms)) {
+                    // Roll back everything written so far so the engine and the
+                    // real GOT state stay consistent.
+                    for (size_t j = 0; j < i; ++j) {
+                        PatchPointer(slots[j].address, before[j], slots[j].perms);
+                    }
+                    return false;
+                }
+            }
             return true;
         }
 
-        bool ApplyPending(PendingHook &pending) {
+        bool ApplyPending(PendingHook &pending, const std::vector<MapInfo> &all_maps) {
             PltRecord *record = FindRecord(pending.dev, pending.inode, pending.symbol.c_str());
             if (record != nullptr) {
                 if (pending.fn == record->original) {
-                    bool restored = false;
-                    for (size_t i = 0; i < record->slots.size(); ++i) {
-                        if (PatchPointer(record->slots[i].address, record->saved[i],
-                                         record->slots[i].perms)) {
-                            restored = true;
-                        }
-                    }
+                    if (!WriteSlots(record->slots, record->saved)) return false;
                     if (pending.backup != nullptr) *pending.backup = record->original;
                     g_records.erase(std::remove_if(g_records.begin(), g_records.end(),
                                                    [&](const PltRecord &r) {
                                                        return &r == record;
                                                    }),
                                     g_records.end());
-                    return restored;
+                    return true;
                 }
-                bool patched = false;
-                for (auto &slot: record->slots) {
-                    if (PatchPointer(slot.address, reinterpret_cast<uintptr_t>(pending.fn),
-                                     slot.perms)) {
-                        patched = true;
-                    }
-                }
+                std::vector<uintptr_t> values(record->slots.size(),
+                                              reinterpret_cast<uintptr_t>(pending.fn));
+                if (!WriteSlots(record->slots, values)) return false;
                 if (pending.backup != nullptr) *pending.backup = record->original;
-                return patched;
+                return true;
             }
 
-            auto maps = MapsFor(MapInfo::Scan(), pending.dev, pending.inode);
+            auto maps = MapsFor(all_maps, pending.dev, pending.inode);
             if (maps.empty()) return false;
             uintptr_t base = BaseFor(maps);
             if (base == 0) return false;
@@ -400,24 +411,28 @@ namespace hook_engine {
 
             DynamicInfo dyn;
             if (!ParseDynamic(maps, base, phdr, ehdr->e_phnum, &dyn)) return false;
+            size_t symcount = SymbolCount(maps, dyn);
+            if (symcount == 0) return false;
 
             std::vector<RelocationSlot> slots;
             if (dyn.jmprel != 0 && dyn.pltrelsz != 0) {
                 if (dyn.pltrel != 0 && dyn.pltrel != DT_RELA) return false;
-                ScanRelocs(maps, base, dyn, dyn.jmprel, dyn.pltrelsz, pending.symbol.c_str(), &slots);
+                ScanRelocs(maps, base, dyn, dyn.jmprel, dyn.pltrelsz, symcount,
+                           pending.symbol.c_str(), &slots);
             }
             if (dyn.rela != 0 && dyn.relasz != 0) {
                 // DT_JMPREL usually points inside DT_RELA; skip the overlap.
                 if (!(dyn.jmprel != 0 && dyn.rela <= dyn.jmprel &&
                       dyn.jmprel + dyn.pltrelsz <= dyn.rela + dyn.relasz)) {
-                    ScanRelocs(maps, base, dyn, dyn.rela, dyn.relasz, pending.symbol.c_str(), &slots);
+                    ScanRelocs(maps, base, dyn, dyn.rela, dyn.relasz, symcount,
+                               pending.symbol.c_str(), &slots);
                 }
             }
             if (slots.empty()) return false;
 
             uintptr_t original_value = *reinterpret_cast<uintptr_t *>(slots[0].address);
             void *original = nullptr;
-            if (!ResolveOriginal(maps, base, pending.symbol.c_str(), original_value, &original))
+            if (!ResolveOriginal(maps, pending.symbol.c_str(), original_value, &original))
                 return false;
 
             PltRecord entry;
@@ -430,12 +445,9 @@ namespace hook_engine {
             for (auto &slot: entry.slots) {
                 entry.saved.push_back(*reinterpret_cast<uintptr_t *>(slot.address));
             }
-            for (auto &slot: entry.slots) {
-                if (!PatchPointer(slot.address, reinterpret_cast<uintptr_t>(pending.fn),
-                                  slot.perms)) {
-                    return false;
-                }
-            }
+            std::vector<uintptr_t> values(entry.slots.size(),
+                                          reinterpret_cast<uintptr_t>(pending.fn));
+            if (!WriteSlots(entry.slots, values)) return false;
             if (pending.backup != nullptr) *pending.backup = original;
             g_records.push_back(std::move(entry));
             return true;
@@ -627,25 +639,71 @@ namespace hook_engine {
             return mem;
         }
 
+        // Allocate an executable page within +/-128 MiB of `target` so that a
+        // single 4-byte B instruction can reach it. A single aligned store is
+        // atomic on arm64, which makes the patch safe against concurrent
+        // callers.
+        void *AllocTrampolineNear(uintptr_t target) {
+            constexpr int64_t kReach = 1LL << 27;
+            constexpr int64_t kStep = 16LL << 20;
+            for (int dir = 0; dir < 2; ++dir) {
+                for (int64_t delta = kStep; delta < kReach; delta += kStep) {
+                    uintptr_t hint;
+                    if (dir == 0) {
+                        hint = target + delta;
+                    } else {
+                        if (target <= static_cast<uintptr_t>(delta)) break;
+                        hint = target - delta;
+                    }
+                    hint = PageStart(hint);
+                    void *mem = mmap(reinterpret_cast<void *>(hint), 4096,
+                                     PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                    if (mem == MAP_FAILED) continue;
+                    int64_t offset = static_cast<int64_t>(
+                            reinterpret_cast<uintptr_t>(mem)) -
+                                     static_cast<int64_t>(target);
+                    if (offset >= -kReach && offset < kReach) return mem;
+                    munmap(mem, 4096);
+                }
+            }
+            return nullptr;
+        }
+
+        bool ProtectCode(void *page, size_t used) {
+            if (mprotect(page, 4096, PROT_READ | PROT_EXEC) != 0) return false;
+            __builtin___clear_cache(reinterpret_cast<char *>(page),
+                                    reinterpret_cast<char *>(page) + used);
+            return true;
+        }
+
+        // Replace exactly one instruction. Aligned 4-byte stores are atomic on
+        // arm64, so callers never observe a torn patch.
+        bool WriteInstruction(uintptr_t address, uint32_t insn, int perms) {
+            if ((address & 3u) != 0) return false;
+            uintptr_t page = PageStart(address);
+            size_t len = PageLength(address, sizeof(uint32_t));
+            if (mprotect(reinterpret_cast<void *>(page), len,
+                         perms | PROT_READ | PROT_WRITE) != 0) {
+                return false;
+            }
+            __atomic_store_n(reinterpret_cast<uint32_t *>(address), insn, __ATOMIC_RELEASE);
+            __builtin___clear_cache(reinterpret_cast<char *>(address),
+                                    reinterpret_cast<char *>(address + sizeof(uint32_t)));
+            if (mprotect(reinterpret_cast<void *>(page), len, perms) != 0) {
+                LOGW("hook: mprotect restore failed at %" PRIxPTR ": %s",
+                     address, strerror(errno));
+            }
+            return true;
+        }
+
         struct InlineRecord {
-            uint32_t saved[4];
-            void *trampoline;
-            size_t size;
+            uint32_t saved;
+            void *stub;
+            void *original;
         };
 
         std::unordered_map<uintptr_t, InlineRecord> g_inline;
-
-        bool WriteCode(uintptr_t address, const uint32_t *code, size_t count, int perms) {
-            uintptr_t page = PageStart(address);
-            size_t len = PageLength(address, count * sizeof(uint32_t));
-            if (mprotect(reinterpret_cast<void *>(page), len, perms | PROT_READ | PROT_WRITE) != 0)
-                return false;
-            memcpy(reinterpret_cast<void *>(address), code, count * sizeof(uint32_t));
-            mprotect(reinterpret_cast<void *>(page), len, perms);
-            __builtin___clear_cache(reinterpret_cast<char *>(address),
-                                    reinterpret_cast<char *>(address + count * sizeof(uint32_t)));
-            return true;
-        }
 
 #endif // __aarch64__
 
@@ -666,9 +724,10 @@ namespace hook_engine {
         }
         if (pending.empty()) return true;
         std::lock_guard<std::mutex> guard(g_lock);
+        auto all_maps = MapInfo::Scan();
         bool ok = true;
         for (auto &item: pending) {
-            if (!ApplyPending(item)) ok = false;
+            if (!ApplyPending(item, all_maps)) ok = false;
         }
         return ok;
     }
@@ -696,51 +755,59 @@ namespace hook_engine {
         const MapInfo *map = FindMap(maps, address, 4 * sizeof(uint32_t), PROT_READ);
         if (map == nullptr) return false;
 
-        auto *trampoline = static_cast<uint32_t *>(AllocTrampoline());
-        if (trampoline == nullptr) return false;
+        // Original trampoline: relocated prologue followed by a jump back to the
+        // instruction after the patched entry.
+        auto *original_tramp = static_cast<uint32_t *>(AllocTrampoline());
+        if (original_tramp == nullptr) return false;
 
-        Emitter emitter{trampoline, 4096 / sizeof(uint32_t)};
+        Emitter original_emitter{original_tramp, 4096 / sizeof(uint32_t)};
         for (size_t i = 0; i < 4; ++i) {
             uint32_t ins = *reinterpret_cast<const uint32_t *>(address + i * 4);
-            if (!EmitInsn(emitter, ins, address + i * 4,
-                          reinterpret_cast<uintptr_t>(trampoline))) {
-                munmap(trampoline, 4096);
+            if (!EmitInsn(original_emitter, ins, address + i * 4,
+                          reinterpret_cast<uintptr_t>(original_tramp))) {
+                munmap(original_tramp, 4096);
                 return false;
             }
         }
-        emitter.Align8();
+        original_emitter.Align8();
         uintptr_t resume = address + 4 * sizeof(uint32_t);
-        if (!emitter.Emit(LdrLiteralX16(2)) || !emitter.Emit(kBrX16) ||
-            !emitter.Emit(static_cast<uint32_t>(resume & 0xFFFFFFFFu)) ||
-            !emitter.Emit(static_cast<uint32_t>(resume >> 32))) {
-            munmap(trampoline, 4096);
+        if (!EmitAbsoluteJump(original_emitter, resume, false) ||
+            !ProtectCode(original_tramp, original_emitter.count * sizeof(uint32_t))) {
+            munmap(original_tramp, 4096);
             return false;
         }
 
-        size_t code_size = emitter.count * sizeof(uint32_t);
-        if (mprotect(trampoline, 4096, PROT_READ | PROT_EXEC) != 0) {
-            munmap(trampoline, 4096);
+        // Hook stub: must live within B range of the target so the entry can be
+        // replaced with one atomic instruction.
+        auto *stub = static_cast<uint32_t *>(AllocTrampolineNear(address));
+        if (stub == nullptr) {
+            munmap(original_tramp, 4096);
             return false;
         }
-        __builtin___clear_cache(reinterpret_cast<char *>(trampoline),
-                                reinterpret_cast<char *>(trampoline) + code_size);
-
-        uint32_t patch[4] = {
-                0x58000050u, // ldr x16, #8
-                kBrX16,      // br x16
-                static_cast<uint32_t>(resume & 0xFFFFFFFFu),
-                static_cast<uint32_t>(resume >> 32),
-        };
-        uint32_t saved[4];
-        memcpy(saved, reinterpret_cast<void *>(address), sizeof(saved));
-        if (!WriteCode(address, patch, 4, map->perms)) {
-            munmap(trampoline, 4096);
+        Emitter stub_emitter{stub, 4096 / sizeof(uint32_t)};
+        if (!EmitAbsoluteJump(stub_emitter, reinterpret_cast<uintptr_t>(replace), false) ||
+            !ProtectCode(stub, stub_emitter.count * sizeof(uint32_t))) {
+            munmap(stub, 4096);
+            munmap(original_tramp, 4096);
             return false;
         }
 
-        g_inline.emplace(address, InlineRecord{{saved[0], saved[1], saved[2], saved[3]},
-                                               trampoline, 4096});
-        *original = trampoline;
+        uint32_t branch = EncodeBranch(address, reinterpret_cast<uintptr_t>(stub), false);
+        if (branch == 0) {
+            munmap(stub, 4096);
+            munmap(original_tramp, 4096);
+            return false;
+        }
+        uint32_t saved = 0;
+        memcpy(&saved, reinterpret_cast<void *>(address), sizeof(saved));
+        if (!WriteInstruction(address, branch, map->perms)) {
+            munmap(stub, 4096);
+            munmap(original_tramp, 4096);
+            return false;
+        }
+
+        g_inline.emplace(address, InlineRecord{saved, stub, original_tramp});
+        *original = original_tramp;
         return true;
 #else
         (void) target;
@@ -758,10 +825,11 @@ namespace hook_engine {
         auto it = g_inline.find(address);
         if (it == g_inline.end()) return false;
         auto maps = MapInfo::Scan();
-        const MapInfo *map = FindMap(maps, address, 4 * sizeof(uint32_t), PROT_READ);
+        const MapInfo *map = FindMap(maps, address, sizeof(uint32_t), PROT_READ);
         int perms = map != nullptr ? map->perms : (PROT_READ | PROT_EXEC);
-        // Keep the trampoline mapped: a thread may still be executing it.
-        if (!WriteCode(address, it->second.saved, 4, perms)) return false;
+        // Keep the stub and original trampoline mapped: a thread may still be
+        // executing them.
+        if (!WriteInstruction(address, it->second.saved, perms)) return false;
         g_inline.erase(it);
         return true;
 #else

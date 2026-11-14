@@ -1,6 +1,6 @@
 use crate::constants::{DaemonSocketAction, ProcessFlags};
 use crate::utils::{check_unix_socket, LateInit, UnixStreamExt};
-use crate::{constants, lp_select, root_impl, utils};
+use crate::{constants, exclude, lp_select, root_impl, utils};
 use anyhow::{bail, Result};
 use log::{debug, error, info, trace, warn};
 use passfd::FdPassingExt;
@@ -286,10 +286,20 @@ fn handle_daemon_action(
                 if root_impl::uid_granted_root(uid) {
                     flags |= ProcessFlags::PROCESS_GRANTED_ROOT;
                 }
-                if root_impl::uid_should_umount(uid) {
+                let (mode, excluded) = exclude::query(uid);
+                if excluded || root_impl::uid_should_umount(uid) {
                     flags |= ProcessFlags::PROCESS_ON_DENYLIST;
-                    if std::path::Path::new(constants::PATH_CONTROL_DISABLE_UNMOUNT).exists() {
-                        flags |= ProcessFlags::PROCESS_DISABLE_UNMOUNT;
+                    match mode {
+                        exclude::Mode::Enforce => {
+                            flags |= ProcessFlags::PROCESS_DENYLIST_ENFORCE;
+                        }
+                        exclude::Mode::JustUmount => {
+                            if std::path::Path::new(constants::PATH_CONTROL_DISABLE_UNMOUNT)
+                                .exists()
+                            {
+                                flags |= ProcessFlags::PROCESS_DISABLE_UNMOUNT;
+                            }
+                        }
                     }
                 }
             }

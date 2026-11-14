@@ -59,8 +59,9 @@ implementation:
   their paths)
 + the loader itself is mapped by an in-tree ELF linker instead of the system
   linker, so it never shows up in `soinfo`/`dl_iterate_phdr()`; the mappings
-  are anonymous and named like ART JIT/DEX regions. Images that need TLS or
-  Android packed relocations automatically fall back to `dlopen`
+  are anonymous and named like ART JIT/DEX regions. The in-tree linker handles
+  `DT_RELA`, `RELR` and Android packed relocations (`DT_ANDROID_REL/RELA`,
+  APS2); only images that need TLS fall back to `dlopen`
 + hooks are installed by the in-house engine instead of `lsplt`; only the
   64-bit process image is parsed
 + the one-shot `strdup` PLT hook is removed after the Zygote JNI hooks are
@@ -69,3 +70,27 @@ implementation:
   descriptor-close trap
 + the per-app `/data/adb` control-file check moved into `zygiskd`
 + the loader directory is no longer the well-known `/dev/net0`
+
+## Exclusion modes
+
+Excluded packages can be listed in
+`/data/adb/modules/admirepowered/denylist_apps` (one package per line), and the
+mode is selected in `/data/adb/modules/admirepowered/denylist_mode`. Both are
+merged with the root implementation's own denylist (Magisk DenyList, KernelSU
+umount list, APatch exclude list). Two modes are available, matching Zygisk
+Next:
+
++ `just_umount` (default): mounts are reverted for excluded processes, but
+  Zygisk modules are still injected and their hooks stay active.
++ `enforce`: mounts are reverted and no Zygisk module is loaded at all.
+
+Change the mode at runtime through the bundled control script:
+
+```sh
+/data/adb/modules/admirepowered/bin/zygisk-ctl.sh denylist just_umount
+/data/adb/modules/admirepowered/bin/zygisk-ctl.sh denylist enforce
+/data/adb/modules/admirepowered/bin/zygisk-ctl.sh denylist   # print current mode
+```
+
+Only regular application UIDs (`10000..19999`, any user profile) are matched by
+the package list; system UIDs and `system_server` are never affected.

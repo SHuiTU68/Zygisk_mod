@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string_view>
 #include <unistd.h>
 #include <fcntl.h>
@@ -12,6 +13,44 @@
 #include <sys/mount.h>
 
 using namespace std::string_view_literals;
+
+namespace {
+
+constexpr const char *kDenylistModePath =
+        "/data/adb/modules/admirepowered/denylist_mode";
+
+int denylist_mode(int argc, char **argv) {
+    if (argc == 4) {
+        const char *mode = argv[3];
+        if (strcmp(mode, "just_umount") != 0 && strcmp(mode, "enforce") != 0) {
+            fprintf(stderr, "Invalid denylist mode: %s\n", mode);
+            return 1;
+        }
+        FILE *file = fopen(kDenylistModePath, "w");
+        if (file == nullptr) {
+            perror("fopen denylist_mode");
+            return 1;
+        }
+        fprintf(file, "%s\n", mode);
+        fclose(file);
+        printf("denylist mode: %s\n", mode);
+        return 0;
+    }
+    if (argc == 3) {
+        char mode[32] = {};
+        FILE *file = fopen(kDenylistModePath, "r");
+        if (file != nullptr && fgets(mode, sizeof(mode), file) != nullptr) {
+            mode[strcspn(mode, "\r\n")] = '\0';
+        }
+        if (file != nullptr) fclose(file);
+        printf("denylist mode: %s\n", mode[0] != '\0' ? mode : "just_umount");
+        return 0;
+    }
+    fprintf(stderr, "Usage: %s ctl denylist <just_umount|enforce>\n", argv[0]);
+    return 1;
+}
+
+}
 
 int main(int argc, char **argv) {
     zygiskd::Init(getenv("TMP_PATH"));
@@ -28,6 +67,8 @@ int main(int argc, char **argv) {
             return 1;
         }
         return 0;
+    } else if (argc >= 3 && argv[1] == "ctl"sv && argv[2] == "denylist"sv) {
+        return denylist_mode(argc, argv);
     } else if (argc >= 2 && argv[1] == "ctl"sv) {
         if (argc == 3) {
             if (argv[2] == "start"sv) {
@@ -42,7 +83,7 @@ int main(int argc, char **argv) {
             }
         }
         printf("Zygisk_mod Tracer %s\n", ZKSU_VERSION);
-        printf("Usage: %s ctl start|stop|exit\n", argv[0]);
+        printf("Usage: %s ctl start|stop|exit|denylist <just_umount|enforce>\n", argv[0]);
         return 1;
     } else if (argc >= 2 && argv[1] == "version"sv) {
         printf("Zygisk_mod Tracer %s\n", ZKSU_VERSION);

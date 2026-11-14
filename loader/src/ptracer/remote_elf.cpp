@@ -77,6 +77,10 @@ struct DynamicInfo {
     uintptr_t gnu_hash = 0;
     uintptr_t relr = 0;
     uintptr_t relrsz = 0;
+    uintptr_t android_rel = 0;
+    uintptr_t android_relsz = 0;
+    uintptr_t android_rela = 0;
+    uintptr_t android_relasz = 0;
     std::vector<std::string> needed;
 };
 
@@ -230,9 +234,17 @@ bool parse_dynamic(const Image &img, const ElfW(Phdr) &ph, DynamicInfo *out) {
                 out->relrsz = dyn[i].d_un.d_val;
                 break;
             case DT_ANDROID_REL:
+                out->android_rel = dyn[i].d_un.d_ptr;
+                break;
+            case DT_ANDROID_RELSZ:
+                out->android_relsz = dyn[i].d_un.d_val;
+                break;
             case DT_ANDROID_RELA:
-                LOGD("remote loader: Android packed relocations are not supported");
-                return false;
+                out->android_rela = dyn[i].d_un.d_ptr;
+                break;
+            case DT_ANDROID_RELASZ:
+                out->android_relasz = dyn[i].d_un.d_val;
+                break;
             default:
                 break;
         }
@@ -293,6 +305,102 @@ size_t dynsym_count(const Image &img, const DynamicInfo &dyn) {
         if (count != 0 && count <= kMaxSymbols) return count;
     }
     return 0;
+}
+
+bool decode_sleb128(const uint8_t *&p, const uint8_t *end, int64_t *out) {
+    uint64_t value = 0;
+    unsigned shift = 0;
+    uint8_t byte = 0;
+    do {
+        if (p >= end || shift >= 64) return false;
+        byte = *p++;
+        value |= static_cast<uint64_t>(byte & 0x7fu) << shift;
+        shift += 7;
+    } while ((byte & 0x80u) != 0);
+    if (shift < 64 && (byte & 0x40u) != 0) {
+        value |= ~0ULL << shift;
+    }
+    *out = static_cast<int64_t>(value);
+    return true;
+}
+
+// APS2 packed relocation stream used by DT_ANDROID_REL / DT_ANDROID_RELA.
+// The encoding follows bionic's packed_reloc_iterator: relocation count and the
+// initial offset come first, then groups whose header fields appear in the
+// order offset-delta, info, addend.
+template<typename Apply>
+bool decode_android_relocs(const uint8_t *data, size_t size, Apply apply) {
+    if (size < 4 || memcmp(data, "APS2", 4) != 0) return false;
+    const uint8_t *p = data + 4;
+    const uint8_t *end = data + size;
+    int64_t relocation_count = 0;
+    int64_t initial_offset = 0;
+    if (!decode_sleb128(p, end, &relocation_count) || relocation_count < 0 ||
+        !decode_sleb128(p, end, &initial_offset)) {
+        return false;
+    }
+
+    constexpr int64_t kGroupedByInfo = 1;
+    constexpr int64_t kGroupedByOffsetDelta = 2;
+    constexpr int64_t kGroupedByAddend = 4;
+    constexpr int64_t kGroupHasAddend = 8;
+
+    uint64_t reloc_offset = static_cast<uint64_t>(initial_offset);
+    int64_t addend = 0;
+    while (relocation_count > 0) {
+        int64_t group_size = 0;
+        int64_t group_flags = 0;
+        if (!decode_sleb128(p, end, &group_size) ||
+            !decode_sleb128(p, end, &group_flags)) {
+            return false;
+        }
+        if (group_size <= 0 || group_size > relocation_count) return false;
+
+        const bool grouped_by_offset = (group_flags & kGroupedByOffsetDelta) != 0;
+        const bool grouped_by_info = (group_flags & kGroupedByInfo) != 0;
+        const bool grouped_by_addend = (group_flags & kGroupedByAddend) != 0;
+        const bool has_addend = (group_flags & kGroupHasAddend) != 0;
+
+        int64_t group_offset_delta = 0;
+        int64_t group_info = 0;
+        int64_t group_addend = 0;
+        if (grouped_by_offset && !decode_sleb128(p, end, &group_offset_delta)) return false;
+        if (grouped_by_info && !decode_sleb128(p, end, &group_info)) return false;
+        if (has_addend && grouped_by_addend &&
+            !decode_sleb128(p, end, &group_addend)) {
+            return false;
+        }
+
+        if (!has_addend) {
+            addend = 0;
+        } else if (grouped_by_addend) {
+            // Grouped addends are applied once per group, not per relocation.
+            addend += group_addend;
+        }
+
+        for (int64_t i = 0; i < group_size; ++i) {
+            if (grouped_by_offset) {
+                reloc_offset += static_cast<uint64_t>(group_offset_delta);
+            } else {
+                int64_t delta = 0;
+                if (!decode_sleb128(p, end, &delta)) return false;
+                reloc_offset += static_cast<uint64_t>(delta);
+            }
+
+            int64_t info = group_info;
+            if (!grouped_by_info && !decode_sleb128(p, end, &info)) return false;
+
+            if (has_addend && !grouped_by_addend) {
+                int64_t delta = 0;
+                if (!decode_sleb128(p, end, &delta)) return false;
+                addend += delta;
+            }
+
+            if (!apply(reloc_offset, static_cast<uint64_t>(info), addend)) return false;
+        }
+        relocation_count -= group_size;
+    }
+    return true;
 }
 
 class Remote {
@@ -581,10 +689,56 @@ bool remote_elf_load(int pid, struct user_regs_struct &regs,
         return true;
     };
 
+    auto apply_android = [&](uintptr_t vaddr, size_t size, bool has_addend) -> bool {
+        size_t offset = 0;
+        if (!vaddr_to_offset(img, vaddr, &offset) ||
+            offset + size > img.data.size()) {
+            return false;
+        }
+        const uint8_t *data = img.data.data() + offset;
+        return decode_android_relocs(
+                data, size,
+                [&](uint64_t rel_offset, uint64_t rel_info, int64_t rel_addend) -> bool {
+                    unsigned type = ELF64_R_TYPE(rel_info);
+                    if (type == R_AARCH64_NONE) return true;
+                    if (type != R_AARCH64_ABS64 && type != R_AARCH64_GLOB_DAT &&
+                        type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_RELATIVE &&
+                        type != R_AARCH64_IRELATIVE) {
+                        LOGD("remote loader: unsupported packed relocation type %u", type);
+                        return false;
+                    }
+                    const ElfW(Sym) *sym = nullptr;
+                    if (type != R_AARCH64_RELATIVE && type != R_AARCH64_IRELATIVE) {
+                        size_t index = ELF64_R_SYM(rel_info);
+                        if (index >= symbol_count) return false;
+                        sym = sym_at(index);
+                        if (sym == nullptr) return false;
+                    }
+                    uintptr_t addend = static_cast<uintptr_t>(rel_addend);
+                    if (!has_addend) {
+                        bool read_ok = false;
+                        addend = read_uptr_at(img, rel_offset, &read_ok);
+                        if (!read_ok) return false;
+                    }
+                    bool ok = true;
+                    uintptr_t value = relocation_value(sym, type, addend, &ok);
+                    if (!ok) return false;
+                    return write_value(rel_offset, value);
+                });
+    };
+
     if (!apply_rela(dyn.rela, dyn.relasz)) return fail();
     if (dyn.jmprel != 0) {
         if (dyn.pltrel != DT_RELA) return fail();
         if (!apply_rela(dyn.jmprel, dyn.pltrelsz)) return fail();
+    }
+    if (dyn.android_rela != 0 || dyn.android_relasz != 0) {
+        if (dyn.android_rela == 0 || dyn.android_relasz == 0) return fail();
+        if (!apply_android(dyn.android_rela, dyn.android_relasz, true)) return fail();
+    }
+    if (dyn.android_rel != 0 || dyn.android_relsz != 0) {
+        if (dyn.android_rel == 0 || dyn.android_relsz == 0) return fail();
+        if (!apply_android(dyn.android_rel, dyn.android_relsz, false)) return fail();
     }
 
     if (dyn.relr != 0) {

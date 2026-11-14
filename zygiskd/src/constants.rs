@@ -27,6 +27,10 @@ pub const PATH_MODULES_DIR: &str = "..";
 /// process never has to touch `/data/adb`.
 pub const PATH_CONTROL_DISABLE_UNMOUNT: &str =
     "/data/adb/modules/admirepowered/.disable_unmount";
+/// Exclusion mode selector: `just_umount` (default) or `enforce`.
+pub const PATH_DENYLIST_MODE: &str = "/data/adb/modules/admirepowered/denylist_mode";
+/// Explicit package list, one package per line (`,` also accepted as separator).
+pub const PATH_DENYLIST_APPS: &str = "/data/adb/modules/admirepowered/denylist_apps";
 pub const ZYGOTE_INJECTED: i32 = lp_select!(5, 4);
 pub const DAEMON_SET_INFO: i32 = lp_select!(7, 6);
 pub const DAEMON_SET_ERROR_INFO: i32 = lp_select!(9, 8);
@@ -57,6 +61,9 @@ bitflags! {
         /// Internal flag: skip the `/data/adb` unmount even when the process is
         /// denylisted. Masked out before the flags reach Zygisk modules.
         const PROCESS_DISABLE_UNMOUNT = 1 << 26;
+        /// Internal flag: "enforce" exclusion mode. The native loader reverts
+        /// every mount and skips module loading entirely.
+        const PROCESS_DENYLIST_ENFORCE = 1 << 25;
         const PROCESS_ROOT_IS_APATCH = 1 << 27;
         const PROCESS_IS_MANAGER = 1 << 28;
         const PROCESS_ROOT_IS_KSU = 1 << 29;

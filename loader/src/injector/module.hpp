@@ -131,10 +131,13 @@ namespace {
         PROCESS_ROOT_IS_MAGISK = (1u << 30),
         PROCESS_IS_SYS_UI = (1u << 31),
 
-        // Internal flag passed from zygiskd, never exposed to modules.
+        // Internal flags passed from zygiskd, never exposed to modules.
         PROCESS_DISABLE_UNMOUNT = (1u << 26),
+        // Zygisk Next "enforce" exclusion mode: exclude the process entirely.
+        PROCESS_DENYLIST_ENFORCE = (1u << 25),
 
-        PRIVATE_MASK = PROCESS_IS_SYS_UI | PROCESS_DISABLE_UNMOUNT
+        PRIVATE_MASK = PROCESS_IS_SYS_UI | PROCESS_DISABLE_UNMOUNT |
+                       PROCESS_DENYLIST_ENFORCE
     };
 
     struct api_abi_base {
