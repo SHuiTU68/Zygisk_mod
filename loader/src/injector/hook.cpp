@@ -196,10 +196,12 @@ DCL_HOOK_FUNC(int, pthread_attr_destroy, void *target) {
     LOGV("pthread_attr_destroy\n");
     if (should_unmap_zygisk) {
         unhook_functions();
-        if (should_unmap_zygisk) {
+        if (should_unmap_zygisk && self_handle != nullptr) {
             // Because both `pthread_attr_destroy` and `dlclose` have the same function signature,
             // we can use `musttail` to let the compiler reuse our stack frame and thus
             // `dlclose` will directly return to the caller of `pthread_attr_destroy`.
+            // A custom-loaded library has no system-linker handle, so it simply
+            // stays mapped under its anonymous mappings.
             [[clang::musttail]] return dlclose(self_handle);
         }
     }
@@ -207,18 +209,23 @@ DCL_HOOK_FUNC(int, pthread_attr_destroy, void *target) {
     return res;
 }
 
-void initialize_jni_hook();
+bool initialize_jni_hook();
 
 // Zygote may resolve the same class name more than once. Installing the JNI
 // hooks twice would record our own trampoline as the "original" method.
-static bool jni_hook_attempted = false;
+// `jni_hook_running` only guards re-entrancy; a failed attempt stays retryable
+// because the JNI environment may not be ready on the first call.
+static bool jni_hook_done = false;
+static bool jni_hook_running = false;
 
 DCL_HOOK_FUNC(char *, strdup, const char *s) {
     if (s == "com.android.internal.os.ZygoteInit"sv) {
         LOGV("strdup %s\n", s);
-        if (!jni_hook_attempted) {
-            jni_hook_attempted = true;
-            initialize_jni_hook();
+        if (!jni_hook_done && !jni_hook_running) {
+            jni_hook_running = true;
+            jni_hook_done = initialize_jni_hook();
+            jni_hook_running = false;
+            if (jni_hook_done) restore_strdup_hook();
         }
     }
     return old_strdup(s);
@@ -278,7 +285,7 @@ void hookJniNativeMethods(JNIEnv *env, const char *clz, JNINativeMethod *methods
 // JNI method hook definitions, auto generated
 #include "jni_hooks.hpp"
 
-void initialize_jni_hook() {
+bool initialize_jni_hook() {
     auto get_created_java_vms = reinterpret_cast<jint (*)(JavaVM **, jsize, jsize *)>(
             dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs"));
     if (!get_created_java_vms) {
@@ -295,16 +302,16 @@ void initialize_jni_hook() {
         }
         if (!get_created_java_vms) {
             LOGW("JNI_GetCreatedJavaVMs not found\n");
-            return;
+            return false;
         }
     }
     JavaVM *vm = nullptr;
     jsize num = 0;
     jint res = get_created_java_vms(&vm, 1, &num);
-    if (res != JNI_OK || vm == nullptr) return;
+    if (res != JNI_OK || vm == nullptr) return false;
     JNIEnv *env = nullptr;
     res = vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
-    if (res != JNI_OK || env == nullptr) return;
+    if (res != JNI_OK || env == nullptr) return false;
 
     auto classMember = lsplant::JNI_FindClass(env, "java/lang/reflect/Member");
     if (classMember != nullptr) member_getModifiers = lsplant::JNI_GetMethodID(env, classMember, "getModifiers", "()I");
@@ -313,19 +320,15 @@ void initialize_jni_hook() {
         auto fieldId = lsplant::JNI_GetStaticFieldID(env, classModifier, "NATIVE", "I");
         if (fieldId != nullptr) MODIFIER_NATIVE = lsplant::JNI_GetStaticIntField(env, classModifier, fieldId);
     }
-    if (member_getModifiers == nullptr || MODIFIER_NATIVE == 0) return;
+    if (member_getModifiers == nullptr || MODIFIER_NATIVE == 0) return false;
     if (!lsplant::art::ArtMethod::Init(env)) {
         LOGE("failed to init ArtMethod");
-        return;
+        return false;
     }
 
     can_hook_jni = true;
     do_hook_zygote(env);
-
-    // `strdup` is only needed once, to detect ZygoteInit. Leaving the GOT entry
-    // permanently redirected is a cheap and reliable Zygisk fingerprint, so put
-    // the original back as soon as the JNI hooks are installed.
-    restore_strdup_hook();
+    return true;
 }
 
 // -----------------------------------------------------------------
@@ -543,9 +546,9 @@ void ZygiskContext::run_modules_pre() {
     for (size_t i = 0; i < size; i++) {
         auto& m = ms[i];
         void* handle = DlopenMem(m.memfd, RTLD_NOW);
-        // The linker has mapped the memfd; keeping the descriptor around only
-        // gives detectors another /proc/self/fd entry to look at.
-        close(m.memfd);
+        // The linker has mapped the memfd; drop our descriptor immediately so
+        // /proc/self/fd has one less entry to inspect. Assigning -1 closes the
+        // old descriptor through UniqueFd's move assignment.
         m.memfd = -1;
         if (void* entry = handle ? dlsym(handle, "zygisk_module_entry") : nullptr) {
             modules.emplace_back(i, handle, entry);

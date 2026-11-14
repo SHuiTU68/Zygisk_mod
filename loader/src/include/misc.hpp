@@ -1,10 +1,10 @@
 #pragma once
 
-#include <list>
 #include <memory>
 #include <pthread.h>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "logging.h"
 
@@ -27,28 +27,6 @@ public:
     }
 private:
     pthread_mutex_t *mutex;
-};
-
-using thread_entry = void *(*)(void *);
-int new_daemon_thread(thread_entry entry, void *arg);
-
-static inline bool str_contains(std::string_view s, std::string_view ss) {
-    return s.find(ss) != std::string_view::npos;
-}
-
-template<typename T, typename Impl>
-class stateless_allocator {
-public:
-    using value_type = T;
-    T *allocate(size_t num) { return static_cast<T*>(Impl::allocate(sizeof(T) * num)); }
-    void deallocate(T *ptr, size_t num) { Impl::deallocate(ptr, sizeof(T) * num); }
-    stateless_allocator()                           = default;
-    stateless_allocator(const stateless_allocator&) = default;
-    stateless_allocator(stateless_allocator&&)      = default;
-    template <typename U>
-    stateless_allocator(const stateless_allocator<U, Impl>&) {}
-    bool operator==(const stateless_allocator&) { return true; }
-    bool operator!=(const stateless_allocator&) { return false; }
 };
 
 template <typename T>
@@ -86,13 +64,3 @@ struct StringCmp {
  * Use our own implementation for faster conversion.
  */
 int parse_int(std::string_view s);
-
-std::list<std::string> split_str(std::string_view s, std::string_view delimiter);
-
-std::string join_str(const std::list<std::string>& list, std::string_view delimiter);
-
-template <typename T>
-static inline T align_to(T v, int a) {
-    static_assert(std::is_integral<T>::value);
-    return (v + a - 1) / a * a;
-}

@@ -1,5 +1,6 @@
-#include <dirent.h>
+#include <cstdio>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -27,21 +28,7 @@ void file_readline(const char *file, const std::function<bool(std::string_view)>
 std::vector<mount_info> parse_mount_info(const char *pid);
 
 using sFILE = std::unique_ptr<FILE, decltype(&fclose)>;
-using sDIR = std::unique_ptr<DIR, decltype(&closedir)>;
-sDIR make_dir(DIR *dp);
 sFILE make_file(FILE *fp);
-
-static inline sDIR open_dir(const char *path) {
-    return make_dir(opendir(path));
-}
-
-static inline sDIR xopen_dir(const char *path) {
-    return make_dir(opendir(path));
-}
-
-static inline sDIR xopen_dir(int dirfd) {
-    return make_dir(fdopendir(dirfd));
-}
 
 static inline sFILE open_file(const char *path, const char *mode) {
     return make_file(fopen(path, mode));

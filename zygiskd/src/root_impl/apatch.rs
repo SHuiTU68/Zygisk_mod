@@ -82,7 +82,7 @@ fn read_package_config() -> Result<Vec<PackageConfig>, std::io::Error> {
         match record {
             Ok(config) => package_configs.push(config),
             Err(error) => {
-                log::warn!("Error deserializing record");
+                log::warn!("Error deserializing record: {error}");
             }
         }
     }
@@ -100,7 +100,7 @@ pub fn uid_granted_root(uid: i32) -> bool {
                 .unwrap_or(false)
         }
         Err(err) => {
-            log::warn!("Error reading package config");
+            log::warn!("Error reading package config: {err}");
             return false;
         }
     }
@@ -121,7 +121,7 @@ pub fn uid_should_umount(uid: i32) -> bool {
                 .unwrap_or(false)
         }
         Err(err) => {
-            log::warn!("Error reading package configs");
+            log::warn!("Error reading package configs: {err}");
             false
         }
     }

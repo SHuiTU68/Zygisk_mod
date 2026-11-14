@@ -17,6 +17,7 @@
 #include <cinttypes>
 
 #include "utils.hpp"
+#include "remote_elf.hpp"
 
 bool inject_on_main(int pid, const char *lib_path) {
     LOGI("injecting %s to zygote %d", lib_path, pid);
@@ -90,6 +91,28 @@ bool inject_on_main(int pid, const char *lib_path) {
         auto local_map = MapInfo::Scan();
         auto libc_return_addr = find_module_return_addr(map, "libc.so");
         LOGD("libc return addr %p", libc_return_addr);
+
+        // Try the in-process ELF linker first. It maps the loader as anonymous
+        // memory and never registers it with the system linker, so it cannot be
+        // found through soinfo or dl_iterate_phdr(). Anything unsupported falls
+        // back to the regular dlopen path below.
+        RemoteElfInfo elf;
+        if (remote_elf_load(pid, regs, local_map, map, (uintptr_t) libc_return_addr,
+                            lib_path, &elf)) {
+            LOGD("remote loader entry %p", (void *) elf.entry);
+            std::vector<long> args;
+            auto str = push_string(pid, regs, zygiskd::GetTmpPath().c_str());
+            // No system-linker handle: the self-unload path is skipped because
+            // dlclose() only understands handles returned by the linker.
+            args.push_back(0);
+            args.push_back((long) str);
+            remote_call(pid, regs, elf.entry, (uintptr_t) libc_return_addr, args);
+
+            backup.REG_IP = (long) entry_addr;
+            if (!set_regs(pid, backup)) return false;
+            return true;
+        }
+        LOGW("remote loader failed, falling back to dlopen");
 
         // call dlopen
         auto dlopen_addr = find_func_addr(local_map, map, "libdl.so", "dlopen");

@@ -49,6 +49,11 @@ implementation:
 + loader and module `memfd` mappings are replaced with anonymous, benignly
   named mappings after specialization (`/proc/self/maps` no longer exposes
   their paths)
++ the loader itself is mapped by an in-tree ELF linker instead of the system
+  linker, so it never shows up in `soinfo`/`dl_iterate_phdr()`; the mappings
+  are anonymous and named like ART JIT/DEX regions. Images that need TLS or
+  Android packed relocations automatically fall back to `dlopen`, and arm32
+  zygotes keep using `dlopen`
 + the one-shot `strdup` PLT hook is removed after the Zygote JNI hooks are
   installed
 + inherited file descriptors are no longer mass-closed, defeating the

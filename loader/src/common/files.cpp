@@ -113,10 +113,6 @@ std::vector<mount_info> parse_mount_info(const char *pid) {
     return result;
 }
 
-sDIR make_dir(DIR *dp) {
-    return sDIR(dp, [](DIR *dp){ return dp ? closedir(dp) : 1; });
-}
-
 sFILE make_file(FILE *fp) {
     return sFILE(fp, [](FILE *fp){ return fp ? fclose(fp) : 1; });
 }

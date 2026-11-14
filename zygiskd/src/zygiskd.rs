@@ -163,8 +163,18 @@ fn random_memfd_name() -> String {
     // A stable name such as "jit-cache" becomes a reliable fingerprint in
     // /proc/<pid>/maps. Randomize it per module load instead.
     let mut bytes = [0u8; 8];
+    let mut randomized = false;
     if let Ok(mut f) = fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
+        randomized = f.read_exact(&mut bytes).is_ok();
+    }
+    if !randomized || bytes == [0u8; 8] {
+        // Never fall back to a constant name: mix in the clock and pid so
+        // consecutive loads still differ.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        bytes = (nanos ^ ((std::process::id() as u64) << 32)).to_le_bytes();
     }
     let mut name = String::with_capacity(20);
     name.push_str("jit-");
